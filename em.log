@@ -1,6 +1,0 @@
-17:36:20 - C:\03_code\pythonCode\easymoneycrawling\venv\src\BaseFacility\Logconfig\logconfig.py[line:18] - INFO: init logging componet successed!
-17:36:25 - C:\03_code\pythonCode\easymoneycrawling\venv\src\orm\dbmanager\dborm.py[line:30] - INFO: init_sqlalchemy successed!
-17:36:25 - C:\03_code\pythonCode\easymoneycrawling\venv\src\mytushare\commonapi.py[line:128] - INFO: 开始tushare接口获取股票数据
-17:36:25 - C:\03_code\pythonCode\easymoneycrawling\venv\src\mytushare\commonapi.py[line:129] - INFO: 请选择下面选项，输入数字
-17:36:25 - C:\03_code\pythonCode\easymoneycrawling\venv\src\mytushare\commonapi.py[line:130] - INFO: 1、股票基本信息，代码、行业、发行日期、地区
-17:36:25 - C:\03_code\pythonCode\easymoneycrawling\venv\src\mytushare\commonapi.py[line:131] - INFO: 2、股票沪深创的日线数据，代码、成交量、最高价、最低价
