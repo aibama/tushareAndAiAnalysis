@@ -1,0 +1,14 @@
+{
+    "python.defaultInterpreterPath": "C:/Users/dzs52/miniconda3/envs/py_newest_stock/python.exe",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}",
+        "${workspaceFolder}/venv/src"
+    ],
+    "python.autoComplete.extraPaths": [
+        "${workspaceFolder}",
+        "${workspaceFolder}/venv/src"
+    ],
+    "terminal.integrated.env.windows": {
+        "PYTHONPATH": "${workspaceFolder};${workspaceFolder}/venv/src"
+    }
+}

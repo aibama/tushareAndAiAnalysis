@@ -1,0 +1,33 @@
+# 股票形态分析系统依赖
+# Pattern Analysis System Dependencies
+
+# Web框架
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# 数据库
+pymysql>=1.1.0
+sqlalchemy>=2.0.0
+
+# 数据处理
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.11.0
+
+# 日期处理
+python-dateutil>=2.8.0
+
+# 数据验证
+pydantic>=2.5.0
+
+# 可选: AI模型支持
+torch>=2.0.0
+torchaudio>=2.0.0
+torchvision>=0.15.0
+
+# 可选: 机器学习
+scikit-learn>=1.4.0
+
+# 可选: 异步支持
+aiohttp>=3.9.0
+httpx>=0.26.0

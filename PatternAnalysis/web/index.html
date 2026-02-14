@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>股票形态分析系统</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        header {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+        }
+        
+        .controls {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        
+        .control-group label {
+            font-size: 12px;
+            color: #666;
+        }
+        
+        select, input[type="date"] {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+            min-width: 150px;
+        }
+        
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #5568d3;
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background: #545b62;
+        }
+        
+        .stats {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .stat-card.green {
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+        }
+        
+        .stat-card.red {
+            background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+        }
+        
+        .stat-value {
+            font-size: 28px;
+            font-weight: bold;
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            opacity: 0.9;
+        }
+        
+        .pattern-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .tab-btn {
+            padding: 10px 20px;
+            background: white;
+            border: 2px solid #667eea;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        
+        .tab-btn.active {
+            background: #667eea;
+            color: white;
+        }
+        
+        .tab-btn:hover {
+            background: #667eea;
+            color: white;
+        }
+        
+        .results-container {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .pattern-section {
+            margin-bottom: 30px;
+        }
+        
+        .pattern-title {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .stock-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .stock-table th,
+        .stock-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .stock-table th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .stock-table tr:hover {
+            background: #f8f9fa;
+        }
+        
+        .return-positive {
+            color: #28a745;
+            font-weight: bold;
+        }
+        
+        .return-negative {
+            color: #dc3545;
+            font-weight: bold;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        
+        .info {
+            background: #d1ecf1;
+            color: #0c5460;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        
+        @media (max-width: 768px) {
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .stock-table {
+                font-size: 12px;
+            }
+            
+            .stock-table th,
+            .stock-table td {
+                padding: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📈 股票形态分析系统</h1>
+            <p class="subtitle">基于K线形态的智能分类与涨跌幅分析</p>
+        </header>
+        
+        <div class="controls">
+            <div class="control-group">
+                <label>时间周期</label>
+                <select id="periodType">
+                    <option value="3m">3个月</option>
+                    <option value="6m">6个月</option>
+                    <option value="9m">9个月</option>
+                    <option value="12m">12个月</option>
+                    <option value="custom">自定义</option>
+                </select>
+            </div>
+            <div class="control-group" id="customDateGroup" style="display: none;">
+                <label>自定义日期范围</label>
+                <div style="display: flex; gap: 10px;">
+                    <input type="date" id="startDate">
+                    <input type="date" id="endDate">
+                </div>
+            </div>
+            <button class="btn-primary" onclick="analyze()">🔍 开始分析</button>
+            <button class="btn-secondary" onclick="refreshCache()">🔄 刷新缓存</button>
+        </div>
+        
+        <div id="messageArea"></div>
+        
+        <div class="stats" id="statsArea" style="display: none;">
+            <div class="stat-card">
+                <div class="stat-value" id="totalStocks">0</div>
+                <div class="stat-label">总股票数</div>
+            </div>
+            <div class="stat-card green">
+                <div class="stat-value" id="avgReturn">0%</div>
+                <div class="stat-label">平均涨幅</div>
+            </div>
+            <div class="stat-card red">
+                <div class="stat-value" id="topPattern">-</div>
+                <div class="stat-label">最多形态</div>
+            </div>
+        </div>
+        
+        <div class="pattern-tabs" id="patternTabs"></div>
+        
+        <div class="results-container" id="resultsArea">
+            <div class="loading" id="loading">点击"开始分析"获取形态分类结果</div>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = 'http://localhost:8000';
+        let currentResults = null;
+        let activeTab = null;
+        
+        const patternNames = {
+            1: '单边上涨',
+            2: '单边下跌',
+            3: '上升三角形',
+            4: '下降三角形',
+            5: '对称三角形',
+            6: '杯状带柄',
+            7: '头肩顶',
+            8: '头肩底',
+            9: '圆弧顶',
+            10: '圆弧底',
+            11: '其他形态'
+        };
+        
+        // 初始化
+        document.getElementById('periodType').addEventListener('change', function() {
+            const customGroup = document.getElementById('customDateGroup');
+            customGroup.style.display = this.value === 'custom' ? 'flex' : 'none';
+        });
+        
+        async function analyze() {
+            const periodType = document.getElementById('periodType').value;
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+            
+            // 显示加载状态
+            document.getElementById('loading').innerHTML = '正在分析...';
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('resultsArea').style.display = 'block';
+            document.getElementById('statsArea').style.display = 'none';
+            document.getElementById('patternTabs').innerHTML = '';
+            
+            try {
+                let url = `${API_BASE}/api/patterns?period_type=${periodType}&use_cache=false`;
+                
+                if (periodType === 'custom') {
+                    if (!startDate || !endDate) {
+                        throw new Error('请选择自定义日期范围');
+                    }
+                    url += `&start_date=${startDate}&end_date=${endDate}`;
+                }
+                
+                const response = await fetch(url);
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || '请求失败');
+                }
+                
+                currentResults = await response.json();
+                displayResults(currentResults);
+                
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+        
+        function displayResults(data) {
+            // 显示统计信息
+            document.getElementById('statsArea').style.display = 'grid';
+            document.getElementById('totalStocks').textContent = data.total_stocks;
+            
+            // 计算平均涨幅
+            let totalReturn = 0;
+            let count = 0;
+            const patternCounts = {};
+            
+            data.pattern_groups.forEach(group => {
+                patternCounts[group.pattern_name] = group.stocks.length;
+                group.stocks.forEach(stock => {
+                    if (stock.curr_return !== null) {
+                        totalReturn += stock.curr_return;
+                        count++;
+                    }
+                });
+            });
+            
+            const avgReturn = count > 0 ? (totalReturn / count * 100).toFixed(2) : '0.00';
+            document.getElementById('avgReturn').textContent = `${avgReturn}%`;
+            
+            // 找出最多的形态
+            let maxPattern = '-';
+            let maxCount = 0;
+            for (const [name, cnt] of Object.entries(patternCounts)) {
+                if (cnt > maxCount) {
+                    maxCount = cnt;
+                    maxPattern = name;
+                }
+            }
+            document.getElementById('topPattern').textContent = maxPattern;
+            
+            // 生成标签页
+            const tabsContainer = document.getElementById('patternTabs');
+            tabsContainer.innerHTML = '';
+            
+            data.pattern_groups.forEach((group, index) => {
+                const btn = document.createElement('button');
+                btn.className = `tab-btn ${index === 0 ? 'active' : ''}`;
+                btn.textContent = `${group.pattern_name} (${group.stocks.length})`;
+                btn.onclick = () => switchTab(group.pattern_type);
+                tabsContainer.appendChild(btn);
+            });
+            
+            // 默认显示第一个标签页
+            if (data.pattern_groups.length > 0) {
+                activeTab = data.pattern_groups[0].pattern_type;
+                displayPatternGroup(data.pattern_groups[0], data.current_period, data.previous_period);
+            }
+            
+            document.getElementById('loading').style.display = 'none';
+        }
+        
+        function switchTab(patternType) {
+            // 更新标签页状态
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+                if (btn.textContent.includes(patternNames[patternType])) {
+                    btn.classList.add('active');
+                }
+            });
+            
+            // 显示对应的分组
+            const group = currentResults.pattern_groups.find(g => g.pattern_type === patternType);
+            if (group) {
+                displayPatternGroup(group, currentResults.current_period, currentResults.previous_period);
+            }
+        }
+        
+        function displayPatternGroup(group, currentPeriod, previousPeriod) {
+            const container = document.getElementById('resultsArea');
+            
+            let html = `
+                <div class="pattern-section">
+                    <h2 class="pattern-title">
+                        ${patternNames[group.pattern_type]}
+                        <span style="font-size: 14px; color: #666;">(${group.stocks.length}只股票)</span>
+                    </h2>
+            `;
+            
+            if (group.stocks.length === 0) {
+                html += '<p style="color: #666;">暂无数据</p>';
+            } else {
+                html += `
+                    <table class="stock-table">
+                        <thead>
+                            <tr>
+                                <th>股票代码</th>
+                                <th>当前周期涨幅</th>
+                                <th>上一周期涨幅</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+                
+                // 按当前周期涨幅降序排序
+                const sortedStocks = [...group.stocks].sort((a, b) => {
+                    const retA = a.curr_return || -999;
+                    const retB = b.curr_return || -999;
+                    return retB - retA;
+                });
+                
+                sortedStocks.forEach(stock => {
+                    const currReturn = stock.curr_return !== null 
+                        ? `${(stock.curr_return * 100).toFixed(2)}%` 
+                        : '-';
+                    const prevReturn = stock.prev_return !== null 
+                        ? `${(stock.prev_return * 100).toFixed(2)}%` 
+                        : '-';
+                    
+                    const currClass = stock.curr_return > 0 ? 'return-positive' : 
+                                     (stock.curr_return < 0 ? 'return-negative' : '');
+                    const prevClass = stock.prev_return > 0 ? 'return-positive' : 
+                                     (stock.prev_return < 0 ? 'return-negative' : '');
+                    
+                    html += `
+                        <tr>
+                            <td><strong>${stock.ts_code}</strong></td>
+                            <td class="${currClass}">${currReturn}</td>
+                            <td class="${prevClass}">${prevReturn}</td>
+                            <td>
+                                <button class="btn-secondary" 
+                                    style="padding: 5px 10px; font-size: 12px;"
+                                    onclick="showStockDetail('${stock.ts_code}', '${currentResults.period_type}')">
+                                    详情
+                                </button>
+                            </td>
+                        </tr>
+                    `;
+                });
+                
+                html += '</tbody></table>';
+            }
+            
+            html += '</div>';
+            container.innerHTML = html;
+        }
+        
+        async function showStockDetail(tsCode, periodType) {
+            try {
+                const url = `${API_BASE}/api/patterns/${tsCode}?period_type=${periodType}`;
+                const response = await fetch(url);
+                
+                if (!response.ok) {
+                    throw new Error('获取详情失败');
+                }
+                
+                const data = await response.json();
+                alert(`
+股票代码: ${data.ts_code}
+形态类型: ${data.pattern_name}
+当前周期: ${data.current_period.start} 至 ${data.current_period.end}
+当前涨幅: ${data.current_period.return !== null ? (data.current_period.return * 100).toFixed(2) + '%' : '-'}
+上一周期: ${data.previous_period.start} 至 ${data.previous_period.end}
+上一涨幅: ${data.previous_period.return !== null ? (data.previous_period.return * 100).toFixed(2) + '%' : '-'}
+                `);
+            } catch (error) {
+                alert('获取详情失败: ' + error.message);
+            }
+        }
+        
+        async function refreshCache() {
+            try {
+                showMessage('正在刷新缓存...', 'info');
+                
+                const response = await fetch(`${API_BASE}/api/jobs/incremental`, {
+                    method: 'POST'
+                });
+                
+                if (!response.ok) {
+                    throw new Error('刷新失败');
+                }
+                
+                showMessage('缓存刷新成功', 'info');
+            } catch (error) {
+                showError('刷新缓存失败: ' + error.message);
+            }
+        }
+        
+        function showError(message) {
+            document.getElementById('messageArea').innerHTML = `
+                <div class="error">${message}</div>
+            `;
+            document.getElementById('loading').style.display = 'none';
+        }
+        
+        function showMessage(message, type) {
+            document.getElementById('messageArea').innerHTML = `
+                <div class="${type}">${message}</div>
+            `;
+        }
+        
+        // 检查API健康状态
+        async function checkHealth() {
+            try {
+                const response = await fetch(`${API_BASE}/health`);
+                if (response.ok) {
+                    console.log('API服务正常运行');
+                }
+            } catch (error) {
+                console.warn('API服务未运行，请先启动服务');
+            }
+        }
+        
+        checkHealth();
+    </script>
+</body>
+</html>

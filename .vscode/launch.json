@@ -1,19 +1,27 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "运行当前Python文件",
+            "name": "Python: 当前文件",
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
             "justMyCode": true,
             "cwd": "${workspaceFolder}",
+            "python": "C:/Users/dzs52/miniconda3/envs/py_newest_stock/python.exe"
+        },
+        {
+            "name": "PatternAnalysis服务",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/run_server.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "python": "C:/Users/dzs52/miniconda3/envs/py_newest_stock/python.exe",
             "env": {
-                "PYTHONPATH": "${workspaceFolder}/venv/src"
+                "PYTHONPATH": "${workspaceFolder}"
             }
         },
         {
@@ -23,7 +31,8 @@
             "program": "${file}",
             "args": [],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "python": "C:/Users/dzs52/miniconda3/envs/py_newest_stock/python.exe"
         }
     ]
 }
