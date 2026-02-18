@@ -50,6 +50,12 @@ TECHNICAL_INDICATORS = {
     "atr_period": 14
 }
 
+# 回撤反弹配置
+DRAWDOWN_REBOUND_CONFIG = {
+    "window": 252,  # 滚动窗口大小（交易日），默认252（一年）
+    "min_periods": 1  # 最少需要的交易日数量
+}
+
 # 形态分类配置
 PATTERN_CONFIG = {
     "single_up_threshold": 0.15,  # 单边上涨斜率阈值
@@ -61,10 +67,20 @@ PATTERN_CONFIG = {
 # API服务配置
 API_CONFIG = {
     "host": "0.0.0.0",
-    "port": 8000,
+    "port": 8081,
     "debug": False,
     "title": "股票形态分析服务",
     "version": "1.0.0"
+}
+
+# Redis配置
+REDIS_CONFIG = {
+    "host": "localhost",
+    "port": 6379,
+    "db": 0,
+    "password": "dzs940611",
+    "key_prefix": "stock_rank:",
+    "cache_ttl": 3600  # 缓存1小时
 }
 
 # 日志配置
@@ -72,4 +88,13 @@ LOG_CONFIG = {
     "level": "INFO",
     "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     "file": os.path.join(os.path.dirname(__file__), "logs", "pattern_analysis.log")
+}
+
+# 智途API配置
+ZHITU_API_CONFIG = {
+    "token": "3738FCAC-163E-42A4-82CB-34423318394F",
+    "base_url": "https://api.zhituapi.com",
+    "request_interval_min": 5000,  # 最小间隔5秒
+    "request_interval_max": 10000,  # 最大间隔10秒
+    "data_source": "zhituapi"
 }

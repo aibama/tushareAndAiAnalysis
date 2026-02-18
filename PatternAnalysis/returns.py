@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from typing import Optional, Union, Tuple
 from datetime import date
+from .config import DRAWDOWN_REBOUND_CONFIG
 
 
 def calc_period_return(df: pd.DataFrame) -> Optional[float]:
@@ -56,16 +57,25 @@ def calc_period_return_pct(df: pd.DataFrame, decimals: int = 4) -> Optional[str]
     return f"{ret * 100:.{decimals}2f}%"
 
 
-def calc_max_drawdown(df: pd.DataFrame) -> Optional[float]:
+def calc_max_drawdown(df: pd.DataFrame, window: int = None) -> Optional[float]:
     """
-    计算最大回撤
+    计算最大回撤（使用滚动窗口）
+    
+    算法：
+    1. 确定计算的时间窗口
+    2. 计算滚动最高点：对于每个交易日，计算从窗口起始日到当前日的最高收盘价
+    3. 计算回撤：(滚动最高点 - 当前收盘价) / 滚动最高点
+    4. 最大回撤：在窗口内取所有回撤值的最大值
     
     Args:
         df: K线数据DataFrame，需包含 'close' 列
+        window: 计算窗口大小（交易日），默认使用配置文件中的值
     
     Returns:
-        最大回撤比例，失败返回 None
+        最大回撤比例（负数），失败返回 None
     """
+    if window is None:
+        window = DRAWDOWN_REBOUND_CONFIG["window"]
     if df is None or df.empty or 'close' not in df.columns:
         return None
     
@@ -73,14 +83,60 @@ def calc_max_drawdown(df: pd.DataFrame) -> Optional[float]:
     if len(closes) < 2:
         return None
     
-    # 计算累计最高价
-    cummax = closes.cummax()
-    # 计算回撤
-    drawdown = (closes - cummax) / cummax
-    # 最大回撤
-    max_dd = drawdown.min()
+    # 计算滚动最高点（窗口内从起始到当前的最大值）
+    rolling_max = closes.rolling(window, min_periods=1).max()
     
-    return float(max_dd)
+    # 计算每日回撤：(滚动最高点 - 当前收盘价) / 滚动最高点
+    drawdown = (rolling_max - closes) / rolling_max
+    
+    # 计算窗口内的最大回撤
+    max_dd = drawdown.rolling(window, min_periods=1).max()
+    
+    # 返回整体最大回撤
+    result = max_dd.min()
+    
+    return float(result) if not pd.isna(result) else None
+
+
+def calc_max_rebound(df: pd.DataFrame, window: int = None) -> Optional[float]:
+    """
+    计算最大反弹（使用滚动窗口）
+    
+    算法：
+    1. 确定计算的时间窗口
+    2. 计算滚动最低点：对于每个交易日，计算从窗口起始日到当前日的最低收盘价
+    3. 计算反弹：(当前收盘价 - 滚动最低点) / 滚动最低点
+    4. 最大反弹：在窗口内取所有反弹值的最大值
+    
+    Args:
+        df: K线数据DataFrame，需包含 'close' 列
+        window: 计算窗口大小（交易日），默认使用配置文件中的值
+    
+    Returns:
+        最大反弹比例（正数），失败返回 None
+    """
+    if window is None:
+        window = DRAWDOWN_REBOUND_CONFIG["window"]
+    if df is None or df.empty or 'close' not in df.columns:
+        return None
+    
+    closes = df['close'].dropna()
+    if len(closes) < 2:
+        return None
+    
+    # 计算滚动最低点（窗口内从起始到当前的最小值）
+    rolling_min = closes.rolling(window, min_periods=1).min()
+    
+    # 计算每日反弹：(当前收盘价 - 滚动最低点) / 滚动最低点
+    rebound = (closes - rolling_min) / rolling_min
+    
+    # 计算窗口内的最大反弹
+    max_rb = rebound.rolling(window, min_periods=1).max()
+    
+    # 返回整体最大反弹
+    result = max_rb.max()
+    
+    return float(result) if not pd.isna(result) else None
 
 
 def calc_max_gain(df: pd.DataFrame) -> Optional[float]:
@@ -251,6 +307,14 @@ class ReturnCalculator:
         if ret is None:
             return None
         return f"{ret * 100:.{decimals}2f}%"
+    
+    def calc_max_drawdown(self, df: pd.DataFrame) -> Optional[float]:
+        """计算最大回撤"""
+        return calc_max_drawdown(df)
+    
+    def calc_max_rebound(self, df: pd.DataFrame) -> Optional[float]:
+        """计算最大反弹"""
+        return calc_max_rebound(df)
     
     def calc_full_stats(self, df: pd.DataFrame) -> dict:
         """计算完整统计信息"""

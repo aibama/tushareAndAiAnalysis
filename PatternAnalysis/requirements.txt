@@ -31,3 +31,7 @@ scikit-learn>=1.4.0
 # 可选: 异步支持
 aiohttp>=3.9.0
 httpx>=0.26.0
+
+# 可选: 缓存支持
+redis>=5.0.0
+setuptools>=69.0.0

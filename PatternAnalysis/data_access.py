@@ -261,3 +261,120 @@ class StockDataAccess:
         df_prev = get_stock_ohlc_in_range(ts_code, prev_start, prev_end)
         
         return df_curr, df_prev
+    
+    def get_stock_returns_in_range(self, start: datetime, end: datetime, direction: str = "up") -> pd.DataFrame:
+        """
+        批量获取指定日期范围内所有股票的涨跌幅
+
+        计算字段说明：
+        - max_drawdown_rebound: 时间序列收益率 = (末日收盘价 - 首日收盘价) / 首日收盘价 * 100
+        - price_range_return_rate: 区间最高收益 = (区间最高价 - 区间最低价) / 区间最低价 * 100（现货卖空概念）
+
+        使用MySQL 8.0窗口函数优化：
+        - 使用 ROW_NUMBER() 窗口函数标记首日和末日
+        - 无需多次JOIN表，大幅提升查询性能
+
+        Args:
+            start: 开始日期时间
+            end: 结束日期时间
+            direction: up=只统计正值, down=只统计负值, all或None=统计全部
+
+        Returns:
+            包含ts_code、return_rate、max_drawdown_rebound、price_range_return_rate的DataFrame
+        """
+        engine = get_engine()
+
+        # 确保日期是datetime类型
+        if isinstance(start, date) and not isinstance(start, datetime):
+            start = datetime.combine(start, datetime.min.time())
+        if isinstance(end, date) and not isinstance(end, datetime):
+            end = datetime.combine(end, datetime.min.time())
+
+        # 日期字符串格式化
+        start_str = start.strftime('%Y-%m-%d') if isinstance(start, (date, datetime)) else str(start)
+        end_str = end.strftime('%Y-%m-%d') if isinstance(end, (date, datetime)) else str(end)
+
+        # 根据direction参数构建过滤条件
+        if direction == "up":
+            direction_filter = "return_rate > 0"
+        elif direction == "down":
+            direction_filter = "return_rate < 0"
+        else:
+            direction_filter = "1=1"  # direction为all或None时不过滤
+
+        # 使用临时表计算时间序列收益率和区间最高收益
+        create_sql = """
+            CREATE TEMPORARY TABLE calc_result AS
+            SELECT
+                t.ts_code,
+                ROUND((t.last_close - t.first_close) / t.first_close * 100, 2) AS return_rate,
+                ROUND((p.max_close - p.min_close) / p.min_close * 100, 2) AS price_range_return_rate
+            FROM (
+                -- 计算首日和末日收盘价
+                SELECT
+                    ts_code,
+                    MAX(CASE WHEN rn_asc = 1 THEN close END) AS first_close,
+                    MAX(CASE WHEN rn_desc = 1 THEN close END) AS last_close
+                FROM (
+                    SELECT
+                        ts_code,
+                        close,
+                        ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date) AS rn_asc,
+                        ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn_desc
+                    FROM stocktradetodayinfo
+                    WHERE trade_date >= :start_date
+                      AND trade_date <= :end_date
+                      AND close > 0
+                ) ranked
+                WHERE rn_asc = 1 OR rn_desc = 1
+                GROUP BY ts_code
+            ) t
+            JOIN (
+                -- 计算价格区间（区间最高收益，现货卖空概念）
+                SELECT
+                    ts_code,
+                    MIN(close) AS min_close,
+                    MAX(close) AS max_close
+                FROM stocktradetodayinfo
+                WHERE trade_date >= :start_date
+                  AND trade_date <= :end_date
+                  AND close > 0
+                GROUP BY ts_code
+            ) p ON t.ts_code = p.ts_code
+            WHERE t.first_close > 0
+              AND p.min_close > 0;
+        """
+
+        # 根据direction过滤的查询语句
+        result_sql = f"""
+            SELECT
+                ts_code,
+                return_rate AS max_drawdown_rebound,
+                price_range_return_rate
+            FROM calc_result
+            WHERE {direction_filter}
+        """
+
+        try:
+            # 执行SQL
+            with engine.connect() as conn:
+                from sqlalchemy import text
+                # 创建临时表
+                conn.execute(text(create_sql), {"start_date": start_str, "end_date": end_str})
+                conn.commit()
+
+                # 查询结果
+                df = pd.read_sql(text(result_sql), conn)
+
+            if df.empty:
+                return pd.DataFrame(columns=["ts_code", "return_rate", "max_drawdown_rebound", "price_range_return_rate"])
+
+            # 重命名列：return_rate = max_drawdown_rebound（时间序列收益率）
+            df["return_rate"] = df["max_drawdown_rebound"]
+
+            return df[["ts_code", "return_rate", "max_drawdown_rebound", "price_range_return_rate"]]
+        except Exception as e:
+            print(f"批量获取股票涨跌幅失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return pd.DataFrame(columns=["ts_code", "return_rate", "max_drawdown_rebound", "price_range_return_rate"])

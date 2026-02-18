@@ -35,7 +35,10 @@ PatternAnalysis/
 ```bash
 pip install fastapi uvicorn pymysql pandas numpy scipy python-dateutil
 pip install pandas numpy scipy python-dateutil
+pip install setuptools
 conda install -c conda-forge uvicorn
+conda install -c conda-forge setuptools
+conda install -c requests
 ```
 
 ## 配置文件
@@ -159,6 +162,54 @@ POST /api/jobs/incremental
 POST /api/jobs/full
 ```
 
+### 7. 股票排名（涨跌幅）
+
+```http
+GET /api/rank?direction=up&start_date=2025-01-20&end_date=2026-01-10&limit=150
+```
+
+参数:
+- `direction`: 排名方向 (up=涨, down=跌)
+- `start_date`: 开始日期
+- `end_date`: 结束日期
+- `limit`: 返回结果数量限制 (默认150, 最大500)
+- `use_cache`: 是否使用缓存 (默认true)
+
+请求体 (分页参数，可选):
+```json
+{
+    "page": 1,
+    "page_size": 50
+}
+```
+
+响应:
+```json
+{
+    "direction": "up",
+    "start_date": "2025-01-20",
+    "end_date": "2026-01-10",
+    "total_stocks": 150,
+    "page": 1,
+    "page_size": 50,
+    "total_pages": 3,
+    "rankings": [
+        {
+            "rank": 1,
+            "ts_code": "688585.SH",
+            "return_rate": 2091.63,
+            "max_drawdown_rebound": 2091.63,
+            "price_range_return_rate": 3500.25
+        }
+    ]
+}
+```
+
+**字段说明:**
+- `return_rate`: 区间涨跌幅（排名依据）
+- `max_drawdown_rebound`: 时间序列收益率 = (末日收盘价 - 首日收盘价) / 首日收盘价
+- `price_range_return_rate`: 区间最高收益 = (区间最高价 - 区间最低价) / 区间最低价（现货卖空概念）
+
 ## Web界面
 
 打开浏览器访问: http://localhost:8000/web/index.html
@@ -204,6 +255,16 @@ python incremental_jobs.py --mode init
 
 ## 涨跌幅计算
 
+### /api/rank 返回字段说明
+
+| 字段 | 说明 | 计算公式 |
+|------|------|----------|
+| return_rate | 区间涨跌幅（时间序列收益率） | (末日收盘价 - 首日收盘价) / 首日收盘价 × 100% |
+| max_drawdown_rebound | 时间序列收益率 | 同return_rate，冗余字段 |
+| price_range_return_rate | 区间最高收益（现货卖空概念） | (区间最高价 - 区间最低价) / 区间最低价 × 100% |
+
+### 形态分析涨跌幅计算
+
 - **当前周期涨幅**: 当前周期最后交易日收盘价 / 当前周期首日收盘价 - 1
 - **上一周期涨幅**: 上一周期最后交易日收盘价 / 上一周期首日收盘价 - 1
 
@@ -235,3 +296,9 @@ python incremental_jobs.py --mode init
 ## 许可证
 
 MIT License
+
+## 系统启动
+## F5 文件run_server.py
+
+## 接口文档查看
+## http://localhost:8000/docs#/
