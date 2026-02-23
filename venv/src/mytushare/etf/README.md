@@ -141,3 +141,8 @@ count = api.get_adj_incremental(start_date='20190901', end_date='20190926')
 | 黄金ETF | 518880.SH | 上交所 |
 | 纳指ETF | 513100.SH | 上交所 |
 | 创业板ETF | 159915.SZ | 深交所 |
+
+
+## 可以执行的脚本,上位程序；
+api.py
+run_full_etf job.py

@@ -142,7 +142,7 @@ if  __name__ == '__main__':
             GetStockBaseInfo()
             logger.info("获取股票基本信息，代码、行业、发行日期、地区结束");
         if('2'==use_choice):
-            dayrange = DoStockTimeExecute("20250121", "20260126")
+            dayrange = DoStockTimeExecute("20260127", "20260223")
             run_stocktrade = dayrange(GetStockTrade)
             run_stocktrade()
         if ('3' == use_choice):
