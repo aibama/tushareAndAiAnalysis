@@ -7,27 +7,72 @@ import os
 import sys
 import logging
 from datetime import datetime
+from uuid import uuid4
+import math
 from sqlalchemy.dialects.mysql import insert
 
+
+def to_none(value):
+    """将NaN转换为None，其他值原样返回"""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    return value
+
 # 设置路径
-_base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.append(_base_dir)
+_base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # venv/src
+# 添加项目根目录 (用于orm.etf模块)
+_project_root = os.path.dirname(_base_dir)  # 项目根目录
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+# 添加venv/src (包含BaseFacility等模块)
+if _base_dir not in sys.path:
+    sys.path.insert(0, _base_dir)
+# 添加venv/src/orm路径 (用于dbmanager模块)
+_orm_path = os.path.join(_base_dir, 'orm')
+if _orm_path not in sys.path:
+    sys.path.insert(0, _orm_path)
 
 from BaseFacility.Logconfig.logconfig import logger
 from orm.etf.fund_daily_model import etf_daily_base, etf_daily_info
 
-# Tushare token设置
-ts.set_token("27d26a829762ddae3467ca0950f08ae324e08452087f0642b0a859c3de92")
-pro = ts.pro_api()
-pro._DataApi__token = "27d26a829762ddae3467ca0950f08ae324e08452087f0642b0a859c3de92"
-pro._DataApi__http_url = 'http://lianghua.9vvn.com'
+# =====================================================
+# Tushare配置 - 统一从PatternAnalysis/config.py读取
+# =====================================================
+
+# 从配置文件读取Tushare配置
+_token = None
+_http_url = None
+try:
+    from PatternAnalysis.config import TUSHARE_CONFIG
+    _token = TUSHARE_CONFIG.get('token')
+    _http_url = TUSHARE_CONFIG.get('http_url', 'http://lianghua.9vvn.com')
+    token_display = _token[:10] + "..." if _token else "None"
+    logger.info(f"从PatternAnalysis.config读取Tushare配置: token={token_display}, url={_http_url}")
+except ImportError:
+    # 如果无法导入配置，尝试使用默认token
+    logger.warning("无法导入PatternAnalysis.config，使用默认配置")
+    _token = "27d26a829762ddae3467ca0950f08ae324e08452087f0642b0a859c3de92"
+    _http_url = 'http://lianghua.9vvn.com'
+
+# 使用有效的token配置
+if _token:
+    ts.set_token(_token)
+    pro = ts.pro_api()
+    pro._DataApi__token = _token
+    if _http_url:
+        pro._DataApi__http_url = _http_url
+    logger.info("Token配置完成")
+else:
+    logger.error("无法获取有效的Tushare Token，请检查配置！")
+    raise ValueError("未配置有效的Tushare Token")
 
 
 def get_existing_dates(ts_code: str) -> set:
     """获取数据库中已有的交易日期"""
     try:
-        result = etf_daily_info.query.filter_by(ts_code=ts_code).with_entities(
-            etf_daily_info.trade_date
+        from dbmanager import dborm as db
+        result = db.DBSession.query(etf_daily_info.trade_date).filter(
+            etf_daily_info.ts_code == ts_code
         ).all()
         return {r[0] for r in result}
     except Exception as e:
@@ -40,41 +85,29 @@ def save_fund_daily_data(df, ts_code: str):
     if df.empty:
         logger.info(f"没有数据需要保存 for {ts_code}")
         return
-    
-    tmp = []
-    for x in df.to_dict('records'):
-        record = etf_daily_info(
-            ts_code=ts_code,
-            trade_date=x.get('trade_date'),
-            open=x.get('open'),
-            high=x.get('high'),
-            low=x.get('low'),
-            close=x.get('close'),
-            pre_close=x.get('pre_close'),
-            change=x.get('change'),
-            pct_chg=x.get('pct_chg'),
-            vol=x.get('vol'),
-            amount=x.get('amount'),
-            last_update_time=datetime.now()
-        )
-        tmp.append(record)
-    
+
     try:
         # 使用upsert方式插入，避免重复
-        stmt = insert(etf_daily_info).values([{
-            'ts_code': x.get('ts_code'),
-            'trade_date': x.get('trade_date'),
-            'open': x.get('open'),
-            'high': x.get('high'),
-            'low': x.get('low'),
-            'close': x.get('close'),
-            'pre_close': x.get('pre_close'),
-            'change': x.get('change'),
-            'pct_chg': x.get('pct_chg'),
-            'vol': x.get('vol'),
-            'amount': x.get('amount'),
-            'last_update_time': datetime.now()
-        } for x in df.to_dict('records')])
+        # 生成UUID作为主键
+        records = []
+        for x in df.to_dict('records'):
+            record = {
+                'id': str(uuid4()),
+                'ts_code': x.get('ts_code'),
+                'trade_date': x.get('trade_date'),
+                'open': to_none(x.get('open')),
+                'high': to_none(x.get('high')),
+                'low': to_none(x.get('low')),
+                'close': to_none(x.get('close')),
+                'pre_close': to_none(x.get('pre_close')),
+                'change': to_none(x.get('change')),
+                'pct_chg': to_none(x.get('pct_chg')),
+                'vol': to_none(x.get('vol')),
+                'amount': to_none(x.get('amount')),
+                'last_update_time': datetime.now()
+            }
+            records.append(record)
+        stmt = insert(etf_daily_info).values(records)
         stmt = stmt.on_duplicate_key_update(
             open=stmt.inserted.open,
             high=stmt.inserted.high,
@@ -87,13 +120,13 @@ def save_fund_daily_data(df, ts_code: str):
             amount=stmt.inserted.amount,
             last_update_time=stmt.inserted.last_update_time
         )
-        from orm.dbmanager import dborm as db
+        from dbmanager import dborm as db
         db.DBSession.execute(stmt)
         db.DBSession.commit()
         logger.info(f"成功保存 {len(df)} 条 {ts_code} 日线数据")
     except Exception as e:
         logger.error(f"保存数据失败: {e}")
-        from orm.dbmanager import dborm as db
+        from dbmanager import dborm as db
         db.DBSession.rollback()
 
 

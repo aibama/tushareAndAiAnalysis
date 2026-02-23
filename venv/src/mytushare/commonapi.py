@@ -7,6 +7,12 @@ import sys
 # 使用绝对路径确保调试时能找到模块
 _base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(_base_dir)
+
+# 添加项目根目录到sys.path，以便导入PatternAnalysis.config
+_project_root = os.path.dirname(_base_dir)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import logging
 logging.basicConfig()
 logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)
@@ -18,18 +24,20 @@ from sqlalchemy.dialects.mysql import insert;
 from chinese_calendar import is_workday, is_holiday;
 from datetime import datetime;
 
-#186
-# ts.set_token("6008d51896b3681f1b43aa9246f18ca67353c89adffc3cea18ef5976");
-# BROUGHT IN XIANYU 20260127
-ts.set_token("27d26a829762ddae3467ca0950f08ae324e08452087f0642b0a859c3de92");
-# ts.set_token("c8cff04e9a0bccdf8edeeac72fd2bcdc275b534420f0cb6d8b6d6f4a");
-#173
-# ts.set_token("1f4109b339fede6453c309c2db56b31a70e38fe06e29ffd8692c4573");
-#195
-# ts.set_token("a887e3fca94f9b0107724bef3a498f95c3460953e3494118fcdd680c");
-pro = ts.pro_api();
-pro._DataApi__token = "27d26a829762ddae3467ca0950f08ae324e08452087f0642b0a859c3de92" # 保证有这个代码，不然不可以获取
-pro._DataApi__http_url = 'http://lianghua.9vvn.com'  # 保证有这个代码，不然不可以获取
+# 从配置文件读取Tushare配置
+try:
+    from PatternAnalysis.config import TUSHARE_CONFIG
+    _token = TUSHARE_CONFIG.get('token')
+    _http_url = TUSHARE_CONFIG.get('http_url', 'http://lianghua.9vvn.com')
+except ImportError:
+    # 如果无法导入配置，使用备用配置
+    _token = "18bee8fb83e34ae5596920c58b6c799b30a99f1a0b3a2031168331f3f83d"
+    _http_url = 'http://lianghua.9vvn.com'
+
+ts.set_token(_token)
+pro = ts.pro_api()
+pro._DataApi__token = _token
+pro._DataApi__http_url = _http_url
 logger = logging.getLogger(__name__)
 
 def Gfunc_timeGenerate(begin,end):

@@ -50,3 +50,25 @@ CREATE TABLE IF NOT EXISTS `fund_adj_info` (
     INDEX `idx_ts_code` (`ts_code`),
     INDEX `idx_trade_date` (`trade_date`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='基金复权因子';
+
+-- ETF基金基本信息表
+CREATE TABLE IF NOT EXISTS `fund_etf_info` (
+    `ts_code` VARCHAR(20) NOT NULL COMMENT '基金交易代码',
+    `csname` VARCHAR(50) NOT NULL COMMENT 'ETF中文简称',
+    `extname` VARCHAR(100) DEFAULT NULL COMMENT 'ETF扩位简称(对应交易所简称)',
+    `cname` VARCHAR(200) NOT NULL COMMENT '基金中文全称',
+    `index_code` VARCHAR(20) DEFAULT NULL COMMENT 'ETF基准指数代码',
+    `index_name` VARCHAR(200) DEFAULT NULL COMMENT 'ETF基准指数中文全称',
+    `setup_date` DATE DEFAULT NULL COMMENT '设立日期(格式:YYYYMMDD)',
+    `list_date` DATE DEFAULT NULL COMMENT '上市日期(格式:YYYYMMDD)',
+    `list_status` CHAR(1) DEFAULT NULL COMMENT '存续状态(L上市 D退市 P待上市)',
+    `exchange` VARCHAR(10) DEFAULT NULL COMMENT '交易所(上交所SH 深交所SZ)',
+    `mgr_name` VARCHAR(100) DEFAULT NULL COMMENT '基金管理人简称',
+    `custod_name` VARCHAR(200) DEFAULT NULL COMMENT '基金托管人名称',
+    `mgt_fee` DECIMAL(5,4) DEFAULT NULL COMMENT '基金管理人收取的费用',
+    `etf_type` VARCHAR(20) DEFAULT NULL COMMENT '基金投资通道类型(境内、QDII)',
+    PRIMARY KEY (`ts_code`),
+    KEY `idx_list_status` (`list_status`),
+    KEY `idx_exchange` (`exchange`),
+    KEY `idx_list_date` (`list_date`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='ETF基金基本信息表';

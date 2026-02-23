@@ -24,7 +24,7 @@ _venv_etf_path = os.path.join(_project_root, 'venv', 'src', 'mytushare')
 if _venv_etf_path not in sys.path:
     sys.path.insert(0, _venv_etf_path)
 
-from venv.src.mytushare.etf import ETFDailyAPI, ETFShareSizeAPI, FundAdjAPI
+from mytushare.etf import ETFDailyAPI, ETFShareSizeAPI, FundAdjAPI
 from PatternAnalysis.config import DB_CONFIG
 
 # 配置日志

@@ -98,3 +98,9 @@ ZHITU_API_CONFIG = {
     "request_interval_max": 10000,  # 最大间隔10秒
     "data_source": "zhituapi"
 }
+
+# Tushare API配置
+TUSHARE_CONFIG = {
+    "token": "18bee8fb83e34ae5596920c58b6c799b30a99f1a0b3a2031168331f3f83d",
+    "http_url": "http://lianghua.nanyangqiankun.top"  # 自定义Tushare接口地址
+}

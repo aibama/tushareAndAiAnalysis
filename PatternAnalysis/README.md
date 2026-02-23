@@ -39,6 +39,8 @@ pip install setuptools
 conda install -c conda-forge uvicorn
 conda install -c conda-forge setuptools
 conda install -c requests
+conda install -c plombery
+
 ```
 
 ## 配置文件

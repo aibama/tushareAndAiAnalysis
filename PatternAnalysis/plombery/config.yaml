@@ -1,0 +1,46 @@
+# Plombery任务配置
+# MTR/ATR计算任务配置
+
+# MTR/ATR计算任务
+mtr_atr_task:
+  # ATR计算周期
+  atr_period: 14
+  
+  # 任务调度配置
+  schedules:
+    - name: "daily"
+      cron: "0 16 * * *"
+      description: "每日收盘后计算MTR/ATR"
+      enabled: true
+    
+    - name: "hourly"
+      cron: "0 */4 * * *"
+      description: "每4小时增量更新"
+      enabled: true
+    
+    - name: "weekly"
+      cron: "0 16 * * 5"
+      description: "每周五收盘后全量重算"
+      enabled: false
+      force_recalculate: true
+
+# Redis Stream配置
+redis_stream:
+  stream_name: "stock_rank:mtr_atr_stream"
+  max_length: 10000
+  approximate: true
+
+# 数据库配置
+database:
+  host: "localhost"
+  port: 3306
+  username: "root"
+  password: "123456"
+  database: "stockdata"
+  charset: "utf8"
+
+# 日志配置
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/mtr_atr_pipeline.log"
