@@ -13,13 +13,18 @@ _project_root = os.path.dirname(_base_dir)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+# 添加venv/src/orm路径，使dbmanager可以正确导入
+_orm_path = os.path.join(_base_dir, 'orm')
+if _orm_path not in sys.path:
+    sys.path.insert(0, _orm_path)
+
 import logging
 logging.basicConfig()
 logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)
 from BaseFacility.Logconfig.logconfig import *;
-from orm.dbmanager import stocktradebaseinfo_popyo as st;
-from orm.dbmanager import dborm as db;
-from orm.dbmanager.stockbaseinfo_popyo import *;
+from dbmanager import stocktradebaseinfo_popyo as st;
+from dbmanager import dborm as db;
+from dbmanager.stockbaseinfo_popyo import *;
 from sqlalchemy.dialects.mysql import insert;
 from chinese_calendar import is_workday, is_holiday;
 from datetime import datetime;
@@ -142,7 +147,8 @@ if  __name__ == '__main__':
             GetStockBaseInfo()
             logger.info("获取股票基本信息，代码、行业、发行日期、地区结束");
         if('2'==use_choice):
-            dayrange = DoStockTimeExecute("20260127", "20260223")
+            #dayrange = DoStockTimeExecute("20260127", "20260223")
+            dayrange = DoStockTimeExecute("20230101", "20250120")
             run_stocktrade = dayrange(GetStockTrade)
             run_stocktrade()
         if ('3' == use_choice):

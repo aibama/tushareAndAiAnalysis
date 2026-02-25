@@ -1,0 +1,4 @@
+23:54:44 - c:\03_code\pythonCode\easymoneycrawling\venv\src\BaseFacility\Logconfig\logconfig.py[line:18] - INFO: init logging componet successed!
+23:55:23 - c:\03_code\pythonCode\easymoneycrawling\venv\src\BaseFacility\Logconfig\logconfig.py[line:18] - INFO: init logging componet successed!
+23:56:41 - c:\03_code\pythonCode\easymoneycrawling\venv\src\BaseFacility\Logconfig\logconfig.py[line:18] - INFO: init logging componet successed!
+23:56:41 - c:\03_code\pythonCode\easymoneycrawling\venv\src\orm\dbmanager\dborm.py[line:30] - INFO: init_sqlalchemy successed!

@@ -7,6 +7,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Query, Path, HTTPException
 from pydantic import BaseModel, Field
+from typing import Union
 from typing import List, Dict, Optional, Union, Tuple
 from datetime import date, datetime
 from enum import IntEnum
@@ -51,6 +52,32 @@ from .incremental_jobs import (
     get_cached_results,
     IncrementalJobManager
 )
+from .strategy.ATR.atr_stable_period_service import (
+    detect_stable_periods_for_stock,
+    get_stable_periods_from_redis,
+    format_stable_periods_for_api,
+    detect_and_save_all_stocks,
+    get_all_stocks_with_stable_periods,
+    STABLE_PERIOD_STREAM
+)
+
+# 申万行业分类相关导入
+from orm.sw_query_service import SwIndustryQueryService
+import math
+
+
+def _clean_nan_values(obj):
+    """
+    递归清理字典/列表中的NaN值，将其转换为None以便JSON序列化
+    """
+    if isinstance(obj, dict):
+        return {k: _clean_nan_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_clean_nan_values(item) for item in obj]
+    elif isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    else:
+        return obj
 
 
 # 创建FastAPI应用
@@ -467,6 +494,213 @@ async def trigger_full_recalculation():
     return {"status": "started", "message": "全量重算任务已启动"}
 
 
+# ============== ATR稳定期相关API ==============
+
+class StablePeriodParams(BaseModel):
+    """稳定期检测参数"""
+    window: int = Field(default=20, ge=2, le=100, description="CV计算窗口大小（天数）")
+    percentile_threshold: float = Field(default=30, ge=0, le=100, description="百分位阈值（30%分位数=低波动期）")
+    min_stable_days: int = Field(default=5, ge=1, le=50, description="最少连续稳定天数")
+    lookback_period: int = Field(default=241, ge=20, le=500, description="历史数据回溯期（交易日）")
+
+
+class StablePeriodItem(BaseModel):
+    """单个稳定期信息"""
+    start_date: str
+    end_date: str
+    duration_days: int
+    avg_atr: float
+    atr_cv: float
+    stability_score: float
+
+
+class StablePeriodResponse(BaseModel):
+    """稳定期查询响应"""
+    ts_code: str
+    status: str
+    num_stable_periods: int
+    total_stable_days: int
+    max_stable_days: int = Field(description="stable_periods中最大的duration_days")
+    min_stable_days: int = Field(description="查询参数min_stable_days的值，表示返回稳定期的最小天数阈值")
+    stable_periods: List[StablePeriodItem]
+    summary: Optional[Dict] = None
+
+
+@app.get("/api/atr/stable-periods/{ts_code}", response_model=StablePeriodResponse)
+async def get_stock_stable_periods(
+    ts_code: str = Path(..., description="股票代码，如 '000001.SZ'"),
+    window: int = Query(20, ge=2, le=100, description="CV计算窗口大小（天数）"),
+    percentile_threshold: float = Query(30, ge=0, le=100, description="百分位阈值（30%分位数=低波动期）"),
+    min_stable_days: int = Query(5, ge=1, le=50, description="最少连续稳定天数"),
+    lookback_period: int = Query(241, ge=20, le=500, description="历史数据回溯期（交易日）"),
+    use_cache: bool = Query(True, description="是否使用Redis缓存数据")
+):
+    """
+    获取个股的中低波动稳定期信息
+    
+    基于ATR（平均真实波幅）的自适应阈值算法，识别个股的低波动稳定期。
+    
+    **算法说明：**
+    - 使用变异系数（CV = 标准差/均值）衡量ATR的波动稳定性
+    - 动态阈值：根据历史CV数据的百分位数自适应调整
+    - 稳定期判定：CV < 动态阈值 且 连续稳定天数 >= min_stable_days
+    
+    **参数说明：**
+    - window: 计算CV的滚动窗口大小，建议值20天
+    - percentile_threshold: 百分位阈值，建议值30%（表示低于历史30%的CV值）
+    - min_stable_days: 最少连续稳定天数阈值，只有连续稳定天数 >= min_stable_days 的才会被识别为稳定期
+    - lookback_period: 历史数据回溯期，建议值241天（一年交易日）
+    
+    **min_stable_days 逻辑说明：**
+    - 该参数用于过滤稳定期，只有duration_days >= min_stable_days的稳定期才会返回
+    - 返回响应中的min_stable_days字段即为查询时使用的参数值
+    - max_stable_days是stable_periods列表中最大的duration_days
+    
+    **返回示例：**
+    ```json
+    {
+        "ts_code": "000001.SZ",
+        "status": "success",
+        "num_stable_periods": 2,
+        "total_stable_days": 45,
+        "max_stable_days": 26,
+        "min_stable_days": 5,
+        "stable_periods": [
+            {
+                "start_date": "2024-01-15",
+                "end_date": "2024-02-10",
+                "duration_days": 26,
+                "avg_atr": 1.85,
+                "atr_cv": 0.045,
+                "stability_score": 0.955
+            }
+        ]
+    }
+    ```
+    """
+    # 尝试从缓存获取
+    if use_cache:
+        cached_data = get_stable_periods_from_redis(ts_code)
+        if cached_data and cached_data.get("records"):
+            records_data = cached_data["records"]
+            summary = cached_data.get("summary", {})
+            
+            stable_periods = [
+                StablePeriodItem(
+                    start_date=r["start_date"],
+                    end_date=r["end_date"],
+                    duration_days=r["duration_days"],
+                    avg_atr=r["avg_atr"],
+                    atr_cv=r["atr_cv"],
+                    stability_score=r["stability_score"]
+                )
+                for r in records_data
+            ]
+            
+            # 计算max_stable_days
+            max_stable_days = max((r.duration_days for r in stable_periods), default=0)
+            
+            return StablePeriodResponse(
+                ts_code=ts_code,
+                status="cached",
+                num_stable_periods=len(stable_periods),
+                total_stable_days=sum(r.duration_days for r in stable_periods),
+                max_stable_days=max_stable_days,
+                min_stable_days=min_stable_days,
+                stable_periods=stable_periods,
+                summary=summary
+            )
+    
+    # 实时计算
+    records, summary = detect_stable_periods_for_stock(
+        ts_code=ts_code,
+        window=window,
+        percentile_threshold=percentile_threshold,
+        min_stable_days=min_stable_days,
+        lookback_period=lookback_period
+    )
+    
+    if summary.get("status") == "insufficient_data":
+        raise HTTPException(
+            status_code=400,
+            detail=f"数据不足: 需要至少 {summary.get('required', 241)} 个数据点，当前只有 {summary.get('data_points', 0)} 个"
+        )
+    
+    # 格式化结果
+    stable_periods = [
+        StablePeriodItem(
+            start_date=r.start_date,
+            end_date=r.end_date,
+            duration_days=r.duration_days,
+            avg_atr=r.avg_atr,
+            atr_cv=r.atr_cv,
+            stability_score=r.stability_score
+        )
+        for r in records
+    ]
+    
+    # 计算max_stable_days
+    max_stable_days = max((r.duration_days for r in stable_periods), default=0)
+    
+    return StablePeriodResponse(
+        ts_code=ts_code,
+        status="computed",
+        num_stable_periods=len(stable_periods),
+        total_stable_days=sum(r.duration_days for r in stable_periods),
+        max_stable_days=max_stable_days,
+        min_stable_days=min_stable_days,
+        stable_periods=stable_periods,
+        summary=summary
+    )
+
+
+@app.get("/api/atr/stable-periods/index")
+async def get_stable_periods_index():
+    """
+    获取所有已计算稳定期的股票列表
+    
+    返回所有已有中低波动稳定期数据的股票代码。
+    """
+    stocks = get_all_stocks_with_stable_periods()
+    return {
+        "total": len(stocks),
+        "stocks": stocks
+    }
+
+
+@app.post("/api/atr/stable-periods/recalculate")
+async def recalculate_stable_periods(
+    window: int = Query(20, ge=2, le=100),
+    percentile_threshold: float = Query(30, ge=0, le=100),
+    min_stable_days: int = Query(5, ge=1, le=50),
+    lookback_period: int = Query(241, ge=20, le=500)
+):
+    """
+    触发全量重新计算所有股票的稳定期
+    
+    这是一个耗时操作，会在后台批量处理所有股票。
+    """
+    import asyncio
+    
+    def run_detection():
+        return detect_and_save_all_stocks(
+            window=window,
+            percentile_threshold=percentile_threshold,
+            min_stable_days=min_stable_days,
+            lookback_period=lookback_period
+        )
+    
+    # 在线程池中运行（避免阻塞）
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(executor, run_detection)
+    
+    return {
+        "status": "started",
+        "message": f"全量计算已启动，共 {result.get('total_stocks', 0)} 只股票",
+        "result": result
+    }
+
+
 def _compute_drawdown_rebound(args):
     """计算回撤或反弹（异步操作）"""
     ts_code, start_date, end_date, direction = args
@@ -748,6 +982,98 @@ async def get_stock_rank(
         total_pages=total_pages,
         rankings=rankings
     )
+
+
+# ============== 申万行业分类API ==============
+
+@app.get("/api/sw/industry-tree")
+async def get_sw_industry_tree(
+    src: str = Query("SW2021", description="申万版本: SW2014 或 SW2021")
+):
+    """
+    获取申万行业分类树形结构
+    
+    返回申万行业的三级分类树形数据，可用于前端生成目录树。
+    树形结构为: 一级行业 -> 二级行业 -> 三级行业
+    
+    **返回示例：**
+    ```json
+    [
+        {
+            "node_code": "801010",
+            "node_name": "农林牧渔",
+            "level": 1,
+            "children": [
+                {
+                    "node_code": "801020",
+                    "node_name": "农林牧渔基础化工",
+                    "level": 2,
+                    "children": [
+                        {
+                            "node_code": "801030",
+                            "node_name": "农药",
+                            "level": 3,
+                            "children": []
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+    ```
+    """
+    try:
+        tree = SwIndustryQueryService.get_industry_tree(src=src)
+        # 清理NaN值以确保JSON序列化正常
+        tree = _clean_nan_values(tree)
+        return {
+            "status": "success",
+            "src": src,
+            "total_l1": sum(1 for item in tree if item.get('level') == 1),
+            "tree": tree
+        }
+    except Exception as e:
+        logger.error(f"获取申万行业树失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取申万行业树失败: {str(e)}")
+
+
+@app.get("/api/sw/industry-list")
+async def get_sw_industry_list(
+    level: int = Query(None, ge=1, le=3, description="行业层级: 1=一级, 2=二级, 3=三级, 不传则返回全部"),
+    src: str = Query("SW2021", description="申万版本: SW2014 或 SW2021")
+):
+    """
+    获取申万行业分类列表
+    
+    返回指定层级的行业列表，可用于下拉选择等场景。
+    """
+    try:
+        df = SwIndustryQueryService.get_industry_list(level=level, src=src)
+        if df is None or df.empty:
+            return {
+                "status": "success",
+                "level": level,
+                "src": src,
+                "total": 0,
+                "list": []
+            }
+        
+        # 转换为字典列表，排除pandas相关的列
+        df = df.fillna("")
+        records = df.to_dict('records')
+        # 清理NaN值以确保JSON序列化正常
+        records = _clean_nan_values(records)
+        
+        return {
+            "status": "success",
+            "level": level,
+            "src": src,
+            "total": len(records),
+            "list": records
+        }
+    except Exception as e:
+        logger.error(f"获取申万行业列表失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取申万行业列表失败: {str(e)}")
 
 
 # ============== 启动服务 ==============

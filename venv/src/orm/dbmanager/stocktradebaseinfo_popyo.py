@@ -22,7 +22,7 @@ class GUID(TypeDecorator):
             return uuid.UUID(value)
 
 class stocktradebaseinfo(Base):
-    __tablename__ = 'stocktradedailyinfo';
+    __tablename__ = 'stocktradetodayinfo';
 
     id = Column(Integer, primary_key=True);
     ts_code = Column(String);

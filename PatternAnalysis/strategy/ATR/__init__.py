@@ -7,6 +7,7 @@ stable market periods in trading data.
 Submodules
 ----------
 - adaptive_threshold : Core algorithm for detecting stable ATR periods
+- atr_stable_period_service : Service for detecting and storing stable periods in Redis
 
 Quick Start
 -----------
@@ -33,11 +34,31 @@ from .adaptive_threshold import (
     StablePeriod
 )
 
+# Service exports
+from .atr_stable_period_service import (
+    detect_stable_periods_for_stock,
+    get_stable_periods_from_redis,
+    format_stable_periods_for_api,
+    detect_and_save_all_stocks,
+    get_all_stocks_with_stable_periods,
+    StablePeriodRecord,
+    STABLE_PERIOD_STREAM
+)
+
 __all__ = [
+    # Core algorithm
     'detect_stable_periods_adaptive',
     'analyze_stable_periods',
     'quick_detect',
-    'StablePeriod'
+    'StablePeriod',
+    # Service
+    'detect_stable_periods_for_stock',
+    'get_stable_periods_from_redis',
+    'format_stable_periods_for_api',
+    'detect_and_save_all_stocks',
+    'get_all_stocks_with_stable_periods',
+    'StablePeriodRecord',
+    'STABLE_PERIOD_STREAM'
 ]
 
 __version__ = '1.0.0'
