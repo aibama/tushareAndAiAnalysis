@@ -10,6 +10,8 @@ from typing import Optional, List, Tuple
 from datetime import date, datetime
 from .config import DB_CONFIG
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import math
 
 # 全局引擎和锁
 _engine = None
@@ -262,27 +264,85 @@ class StockDataAccess:
         
         return df_curr, df_prev
     
-    def get_stock_returns_in_range(self, start: datetime, end: datetime, direction: str = "up") -> pd.DataFrame:
+    def get_stock_returns_in_range(self, start: datetime, end: datetime, direction: str = "up", num_threads: int = 8) -> pd.DataFrame:
         """
-        批量获取指定日期范围内所有股票的涨跌幅
+        批量获取指定日期范围内所有股票的涨跌幅（多线程版本）
 
         计算字段说明：
         - max_drawdown_rebound: 时间序列收益率 = (末日收盘价 - 首日收盘价) / 首日收盘价 * 100
         - price_range_return_rate: 区间最高收益 = (区间最高价 - 区间最低价) / 区间最低价 * 100（现货卖空概念）
 
-        使用MySQL 8.0窗口函数优化：
-        - 使用 ROW_NUMBER() 窗口函数标记首日和末日
-        - 无需多次JOIN表，大幅提升查询性能
+        多线程优化策略：
+        - 将股票列表分片，每个线程处理一部分股票
+        - 使用MySQL窗口函数计算每批股票的时间序列收益率
+        - 并行执行多批次查询，最后合并结果
 
         Args:
             start: 开始日期时间
             end: 结束日期时间
             direction: up=只统计正值, down=只统计负值, all或None=统计全部
+            num_threads: 线程数，默认为4
 
         Returns:
             包含ts_code、return_rate、max_drawdown_rebound、price_range_return_rate的DataFrame
         """
-        engine = get_engine()
+        # 获取所有股票代码
+        all_codes = self.get_all_ts_codes()
+        if not all_codes:
+            return pd.DataFrame(columns=["ts_code", "return_rate", "max_drawdown_rebound", "price_range_return_rate"])
+
+        total_stocks = len(all_codes)
+        print(f"总股票数: {total_stocks}, 使用 {num_threads} 线程并行计算...")
+
+        # 将股票列表分片
+        chunk_size = math.ceil(total_stocks / num_threads)
+        code_chunks = [all_codes[i:i + chunk_size] for i in range(0, total_stocks, chunk_size)]
+
+        # 使用线程池并行计算
+        all_results = []
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = {
+                executor.submit(
+                    self._calc_returns_for_codes,
+                    chunk,
+                    start,
+                    end,
+                    direction,
+                    i  # thread_id
+                ): i for i, chunk in enumerate(code_chunks)
+            }
+
+            for future in as_completed(futures):
+                try:
+                    result_df = future.result()
+                    if not result_df.empty:
+                        all_results.append(result_df)
+                except Exception as e:
+                    print(f"线程执行失败: {e}")
+
+        # 合并所有结果
+        if not all_results:
+            return pd.DataFrame(columns=["ts_code", "return_rate", "max_drawdown_rebound", "price_range_return_rate"])
+
+        final_df = pd.concat(all_results, ignore_index=True)
+        return final_df[["ts_code", "return_rate", "max_drawdown_rebound", "price_range_return_rate"]]
+
+    def _calc_returns_for_codes(self, ts_codes: List[str], start: datetime, end: datetime, direction: str, thread_id: int) -> pd.DataFrame:
+        """
+        计算指定股票列表的涨跌幅（单批次）
+        为每个线程创建独立的数据库连接，确保并行执行
+        """
+        # 为每个线程创建独立的引擎
+        thread_engine = create_engine(
+            f"mysql+pymysql://{DB_CONFIG['user']}:{DB_CONFIG['password']}"
+            f"@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}"
+            f"?charset={DB_CONFIG['charset']}",
+            poolclass=QueuePool,
+            pool_size=2,
+            max_overflow=5,
+            pool_pre_ping=True,
+            pool_recycle=3600
+        )
 
         # 确保日期是datetime类型
         if isinstance(start, date) and not isinstance(start, datetime):
@@ -294,17 +354,25 @@ class StockDataAccess:
         start_str = start.strftime('%Y-%m-%d') if isinstance(start, (date, datetime)) else str(start)
         end_str = end.strftime('%Y-%m-%d') if isinstance(end, (date, datetime)) else str(end)
 
+        # 构建股票代码列表的SQL条件
+        if not ts_codes:
+            thread_engine.dispose()
+            return pd.DataFrame(columns=["ts_code", "return_rate", "max_drawdown_rebound", "price_range_return_rate"])
+
+        codes_placeholder = ",".join([f"'{code}'" for code in ts_codes])
+
         # 根据direction参数构建过滤条件
         if direction == "up":
             direction_filter = "return_rate > 0"
         elif direction == "down":
             direction_filter = "return_rate < 0"
         else:
-            direction_filter = "1=1"  # direction为all或None时不过滤
+            direction_filter = "1=1"
 
-        # 使用临时表计算时间序列收益率和区间最高收益
-        create_sql = """
-            CREATE TEMPORARY TABLE calc_result AS
+        # 使用临时表计算时间序列收益率和区间最高收益（按股票代码列表过滤）
+        # 使用thread_id确保临时表名唯一
+        create_sql = f"""
+            CREATE TEMPORARY TABLE calc_result_{thread_id} AS
             SELECT
                 t.ts_code,
                 ROUND((t.last_close - t.first_close) / t.first_close * 100, 2) AS return_rate,
@@ -325,6 +393,7 @@ class StockDataAccess:
                     WHERE trade_date >= :start_date
                       AND trade_date <= :end_date
                       AND close > 0
+                      AND ts_code IN ({codes_placeholder})
                 ) ranked
                 WHERE rn_asc = 1 OR rn_desc = 1
                 GROUP BY ts_code
@@ -339,6 +408,7 @@ class StockDataAccess:
                 WHERE trade_date >= :start_date
                   AND trade_date <= :end_date
                   AND close > 0
+                  AND ts_code IN ({codes_placeholder})
                 GROUP BY ts_code
             ) p ON t.ts_code = p.ts_code
             WHERE t.first_close > 0
@@ -351,13 +421,13 @@ class StockDataAccess:
                 ts_code,
                 return_rate AS max_drawdown_rebound,
                 price_range_return_rate
-            FROM calc_result
+            FROM calc_result_{thread_id}
             WHERE {direction_filter}
         """
 
         try:
             # 执行SQL
-            with engine.connect() as conn:
+            with thread_engine.connect() as conn:
                 from sqlalchemy import text
                 # 创建临时表
                 conn.execute(text(create_sql), {"start_date": start_str, "end_date": end_str})
@@ -365,6 +435,12 @@ class StockDataAccess:
 
                 # 查询结果
                 df = pd.read_sql(text(result_sql), conn)
+
+                # 清理临时表
+                conn.execute(text(f"DROP TEMPORARY TABLE IF EXISTS calc_result_{thread_id}"))
+                conn.commit()
+
+            thread_engine.dispose()
 
             if df.empty:
                 return pd.DataFrame(columns=["ts_code", "return_rate", "max_drawdown_rebound", "price_range_return_rate"])
@@ -374,6 +450,7 @@ class StockDataAccess:
 
             return df[["ts_code", "return_rate", "max_drawdown_rebound", "price_range_return_rate"]]
         except Exception as e:
+            thread_engine.dispose()
             print(f"批量获取股票涨跌幅失败: {e}")
             import traceback
             traceback.print_exc()

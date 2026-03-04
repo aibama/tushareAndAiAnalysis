@@ -58,12 +58,101 @@ from .strategy.ATR.atr_stable_period_service import (
     format_stable_periods_for_api,
     detect_and_save_all_stocks,
     get_all_stocks_with_stable_periods,
-    STABLE_PERIOD_STREAM
+    STABLE_PERIOD_STREAM,
+    filter_stocks_by_market_factor,
+    calculate_stocks_market_cap_by_codes,
+    calculate_stock_market_cap,
+    preheat_market_cap_cache
+)
+
+# 涨停跌停主题分析相关导入
+from .strategy.theme.limit_service import (
+    get_stock_limit_info,
+    calculate_limit_prices_for_all_stocks,
+    save_limit_info_to_redis,
+    get_limit_info_from_redis,
+    get_all_limit_stock_codes,
+    LimitPriceInfo
+)
+
+# 成交量主题分析相关导入
+from .strategy.theme.volume_service import (
+    get_stock_lowest_price_volume,
+    get_stock_limit_up_volume,
+    calculate_lowest_price_volume_for_all_stocks,
+    calculate_limit_up_volume_for_all_stocks,
+    save_lowest_price_volume_to_redis,
+    get_lowest_price_volume_from_redis,
+    save_limit_up_volume_to_redis,
+    get_limit_up_volume_from_redis,
+    LowestPriceVolumeInfo,
+    LimitUpVolumeInfo
 )
 
 # 申万行业分类相关导入
-from orm.sw_query_service import SwIndustryQueryService
+from orm.sw_query_service import SwIndustryQueryService, SwStockQueryService
 import math
+
+
+def get_stock_names_batch(ts_codes: List[str]) -> Dict[str, str]:
+    """
+    批量获取股票名称
+
+    参数:
+        ts_codes: 股票代码列表
+
+    返回:
+        Dict: 键为股票代码，值为股票名称
+    """
+    if not ts_codes:
+        return {}
+
+    from orm.database import query_df
+
+    # 构建IN子句
+    placeholders = ','.join([f"'{code}'" for code in ts_codes])
+
+    # 首先尝试从 stockinfobase 表获取（通过ts_code关联）
+    sql = f"""
+        SELECT ts_code, name
+        FROM stockinfobase
+        WHERE ts_code IN ({placeholders})
+    """
+
+    result = {}
+
+    try:
+        df = query_df(sql)
+        if df is not None and not df.empty:
+            for _, row in df.iterrows():
+                if row['ts_code'] and row['name']:
+                    result[row['ts_code']] = row['name']
+    except Exception as e:
+        print(f"从stockinfobase查询失败: {e}")
+
+    # 如果还有未找到的，尝试从tushare获取
+    missing_codes = [c for c in ts_codes if c not in result]
+    if missing_codes:
+        try:
+            import tushare as ts
+            from PatternAnalysis.config import TUSHARE_CONFIG
+            pro = ts.pro_api(TUSHARE_CONFIG['token'])
+
+            # 获取所有未找到的股票
+            for code in missing_codes:
+                # 转换代码格式: 000001.SZ -> 000001.SZ
+                try:
+                    df_tushare = pro.stock_basic(ts_code=code, fields='ts_code,name')
+                    if df_tushare is not None and not df_tushare.empty:
+                        name = df_tushare.iloc[0]['name']
+                        if name:
+                            result[code] = name
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"从tushare查询失败: {e}")
+
+    return result
 
 
 def _clean_nan_values(obj):
@@ -96,6 +185,34 @@ async def startup_event():
         init_tables()
     except Exception as e:
         print(f"警告: 数据库初始化失败 (服务仍可启动): {e}")
+
+    # 启动时预热ATR稳定期缓存
+    try:
+        print("正在检查ATR稳定期缓存...")
+        # 检查是否已有缓存数据
+        existing_stocks = get_all_stocks_with_stable_periods()
+        if not existing_stocks:
+            print("未发现ATR稳定期缓存，开始预热计算...")
+            # 在后台线程中运行，避免阻塞启动
+            import threading
+            def preheat_atr_cache():
+                try:
+                    detect_and_save_all_stocks(
+                        window=20,
+                        percentile_threshold=30,
+                        min_stable_days=5,
+                        lookback_period=241
+                    )
+                    print("ATR稳定期缓存预热完成")
+                except Exception as e:
+                    print(f"ATR稳定期缓存预热失败: {e}")
+
+            preheat_thread = threading.Thread(target=preheat_atr_cache, daemon=True)
+            preheat_thread.start()
+        else:
+            print(f"发现已有ATR稳定期缓存，共 {len(existing_stocks)} 只股票")
+    except Exception as e:
+        print(f"警告: ATR稳定期缓存检查失败 (服务仍可启动): {e}")
 
 
 # ============== 数据模型 ==============
@@ -137,6 +254,7 @@ class StockRankItem(BaseModel):
     """股票排名单项"""
     rank: int
     ts_code: str
+    stock_name: Optional[str] = None  # 股票名称
     return_rate: float  # 区间涨跌幅（时间序列收益率）
     max_drawdown_rebound: Optional[float] = None  # 时间序列收益率 = (末日收盘价 - 首日收盘价) / 首日收盘价
     price_range_return_rate: Optional[float] = None  # 区间最高收益 = (区间最高价 - 区间最低价) / 区间最低价（现货卖空概念）
@@ -158,6 +276,74 @@ class PaginatedStockRankResponse(BaseModel):
     page_size: int
     total_pages: int
     rankings: List[StockRankItem]
+
+
+# ============== 涨停跌停主题分析相关模型 ==============
+
+class LimitPriceInfoResponse(BaseModel):
+    """涨停跌停信息响应"""
+    ts_code: str
+    limit_up_date: Optional[str] = None
+    limit_up_price: Optional[float] = None
+    limit_down_date: Optional[str] = None
+    limit_down_price: Optional[float] = None
+    latest_close: Optional[float] = None
+    sm_pre_up: Optional[float] = None
+    sm_pre_down: Optional[float] = None
+
+
+class LimitStockListResponse(BaseModel):
+    """涨停/跌停股票列表响应"""
+    limit_type: str
+    total: int
+    ts_codes: List[str]
+
+
+class CalculateAllResponse(BaseModel):
+    """批量计算响应"""
+    status: str
+    total_stocks: int
+    limit_up_count: int
+    limit_down_count: int
+    message: str
+
+
+# ============== 成交量主题分析相关模型 ==============
+
+class LowestPriceVolumeResponse(BaseModel):
+    """历史最低价成交量响应"""
+    ts_code: str
+    lowest_price: Optional[float] = None
+    lowest_price_date: Optional[str] = None
+    pre_month_start: Optional[str] = None
+    pre_month_end: Optional[str] = None
+    pre_month_avg_volume: Optional[float] = None
+    pre_month_trading_days: Optional[int] = None
+    post_month_start: Optional[str] = None
+    post_month_end: Optional[str] = None
+    post_month_avg_volume: Optional[float] = None
+    post_month_trading_days: Optional[int] = None
+    total_avg_volume: Optional[float] = None
+    total_trading_days: Optional[int] = None
+
+
+class LimitUpVolumeResponse(BaseModel):
+    """涨停后成交量响应"""
+    ts_code: str
+    limit_up_date: Optional[str] = None
+    limit_up_price: Optional[float] = None
+    limit_up_volume: Optional[float] = None
+    days_since_limit_up: Optional[int] = None
+    cumulative_volume: Optional[float] = None
+    post_limit_avg_volume: Optional[float] = None
+    volume_ratio: Optional[float] = None
+
+
+class VolumeBatchCalculateResponse(BaseModel):
+    """成交量批量计算响应"""
+    status: str
+    total_stocks: int
+    message: str
 
 
 # ============== 依赖注入 ==============
@@ -202,6 +388,20 @@ async def clear_cache():
     manager = RankCacheManager()
     result = manager.clear()
     return result
+
+
+@app.get("/api/rank/test-stock-names")
+async def test_stock_names(
+    ts_codes: str = Query(..., description="股票代码，逗号分隔，如 '000001.SZ,000002.SZ'")
+):
+    """测试股票名称查询"""
+    code_list = [code.strip() for code in ts_codes.split(',')]
+    stock_names = get_stock_names_batch(code_list)
+    return {
+        "requested_codes": code_list,
+        "stock_names": stock_names,
+        "count": len(stock_names)
+    }
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -526,6 +726,212 @@ class StablePeriodResponse(BaseModel):
     summary: Optional[Dict] = None
 
 
+# 注意：固定路径的index路由必须放在{ts_code}参数路由之前，否则/index会被匹配为ts_code参数
+@app.get("/api/atr/stable-periods/index")
+async def get_stable_periods_index(
+    market_factor: Optional[str] = Query(
+        None,
+        description="市值因子筛选: 0Y-100Y(一 hundred亿以下), 100Y-200Y, 200Y-400Y, 400Y-3000000Y"
+    ),
+    full_path: Optional[str] = Query(
+        None,
+        description="申万行业分类路径筛选，如 '801010.801020.801030'"
+    ),
+    page: int = Query(1, ge=1, description="页码，从1开始"),
+    page_size: int = Query(50, ge=1, le=500, description="每页数量")
+):
+    """
+    获取所有已计算稳定期的股票列表，支持市值和行业筛选
+
+    **参数说明：**
+    - market_factor: 市值因子筛选
+        - 0Y-100Y: 一百亿以下
+        - 100Y-200Y: 一百亿至两百亿
+        - 200Y-400Y: 两百亿至四百亿
+        - 400Y-3000000Y: 四百亿以上
+    - full_path: 申万行业分类路径筛选（支持三级路径，如 '801010.801020.801030'）
+    - page: 页码（默认1）
+    - page_size: 每页数量（默认50，最大500）
+
+    **返回示例：**
+    ```json
+    {
+        "total": 1000,
+        "page": 1,
+        "page_size": 50,
+        "total_pages": 20,
+        "stocks": [
+            {
+                "ts_code": "000001.SZ",
+                "market_cap": 15000000000,
+                "sw_industry": {
+                    "l1_name": "银行",
+                    "l2_name": "股份制银行",
+                    "l3_name": "股份制银行"
+                }
+            }
+        ]
+    }
+    ```
+    """
+    # 1. 获取所有有稳定期数据的股票列表
+    stocks = get_all_stocks_with_stable_periods()
+
+    # 2. 如果提供了full_path参数，通过申万概念分类筛选
+    if full_path:
+        logger.info(f"按申万行业筛选: full_path={full_path}")
+        
+        # 查询符合条件的股票
+        from orm.sw_query_service import SwStockQueryService
+        from orm.database import query_df
+
+        # 前端传入逻辑:
+        # - level=1: 传入l1_code (如 801030.SI)
+        # - level=2: 传入l2_code (如 220800)
+        # - level=3: 传入l3_code (如 850333.SI)
+        
+        input_val = full_path.strip()
+        df_sw = None
+        
+        # 根据是否包含.SI后缀来判断传入的是哪个层级
+        # l1_code 和 l3_code 有.SI后缀，l2_code 没有.SI后缀
+        if input_val.endswith('.SI'):
+            # 可能是 l1_code 或 l3_code (都有.SI)
+            # 优先匹配 node_code，因为最精确
+            sql = """
+                SELECT DISTINCT r.ts_code
+                FROM stock_sw_relation r
+                JOIN sw_industry s ON r.sw_node_code = s.node_code
+                WHERE r.is_latest = 1 AND s.node_code = %s
+            """
+            params = {'node_code': input_val}
+            df_sw = query_df(sql, params)
+            
+            # 如果没匹配到，尝试 l1_code
+            if df_sw is None or df_sw.empty:
+                sql = """
+                    SELECT DISTINCT r.ts_code
+                    FROM stock_sw_relation r
+                    JOIN sw_industry s ON r.sw_node_code = s.node_code
+                    WHERE r.is_latest = 1 AND s.l1_code = %s
+                """
+                params = {'l1_code': input_val}
+                df_sw = query_df(sql, params)
+            
+            # 如果还没匹配到，尝试 l3_code
+            if df_sw is None or df_sw.empty:
+                sql = """
+                    SELECT DISTINCT r.ts_code
+                    FROM stock_sw_relation r
+                    JOIN sw_industry s ON r.sw_node_code = s.node_code
+                    WHERE r.is_latest = 1 AND s.l3_code = %s
+                """
+                params = {'l3_code': input_val}
+                df_sw = query_df(sql, params)
+        else:
+            # 没有.SI后缀，可能是 l2_code (如 220800)
+            sql = """
+                SELECT DISTINCT r.ts_code
+                FROM stock_sw_relation r
+                JOIN sw_industry s ON r.sw_node_code = s.node_code
+                WHERE r.is_latest = 1 AND s.l2_code = %s
+            """
+            params = {'l2_code': input_val}
+            df_sw = query_df(sql, params)
+            
+            # 如果没匹配到，尝试带.SI后缀的版本(l1_code或l3_code)
+            if df_sw is None or df_sw.empty:
+                input_with_suffix = input_val + '.SI'
+                sql = """
+                    SELECT DISTINCT r.ts_code
+                    FROM stock_sw_relation r
+                    JOIN sw_industry s ON r.sw_node_code = s.node_code
+                    WHERE r.is_latest = 1 AND s.l1_code = %s
+                """
+                params = {'l1_code': input_with_suffix}
+                df_sw = query_df(sql, params)
+                
+                if df_sw is None or df_sw.empty:
+                    sql = """
+                        SELECT DISTINCT r.ts_code
+                        FROM stock_sw_relation r
+                        JOIN sw_industry s ON r.sw_node_code = s.node_code
+                        WHERE r.is_latest = 1 AND s.l3_code = %s
+                    """
+                    params = {'l3_code': input_with_suffix}
+                    df_sw = query_df(sql, params)
+
+        if df_sw is not None and not df_sw.empty:
+            sw_stocks = set(df_sw['ts_code'].tolist())
+            # 取交集
+            stocks = list(set(stocks) & sw_stocks)
+            logger.info(f"申万行业筛选后股票数量: {len(stocks)}")
+
+        df_sw = query_df(sql, params)
+        if df_sw is not None and not df_sw.empty:
+            sw_stocks = set(df_sw['ts_code'].tolist())
+            # 取交集
+            stocks = list(set(stocks) & sw_stocks)
+            logger.info(f"申万行业筛选后股票数量: {len(stocks)}")
+
+    # 3. 如果提供了market_factor参数，通过市值筛选
+    if market_factor:
+        logger.info(f"按市值筛选: market_factor={market_factor}")
+        stocks = filter_stocks_by_market_factor(stocks, market_factor)
+
+    # 4. 计算总数和分页
+    total_stocks = len(stocks)
+    total_pages = (total_stocks + page_size - 1) // page_size
+    start_idx = (page - 1) * page_size
+    end_idx = min(start_idx + page_size, total_stocks)
+
+    # 5. 获取当前页的股票数据
+    page_stocks = stocks[start_idx:end_idx]
+
+    # 6. 批量获取市值、申万行业信息和股票名称（优化版）
+    # 6.1 批量获取市值
+    market_caps = calculate_stocks_market_cap_by_codes(page_stocks)
+
+    # 6.2 批量获取申万行业信息
+    from orm.sw_query_service import SwStockQueryService
+    sw_industries = SwStockQueryService.get_stocks_industry_batch(page_stocks)
+
+    # 6.3 批量获取股票名称
+    stock_names = get_stock_names_batch(page_stocks)
+
+    # 6.4 组装结果
+    result_stocks = []
+    for ts_code in page_stocks:
+        item = {"ts_code": ts_code}
+
+        # 获取股票名称
+        stock_name = stock_names.get(ts_code)
+        if stock_name:
+            item["stock_name"] = stock_name
+
+        # 获取市值
+        market_cap = market_caps.get(ts_code)
+        if market_cap:
+            item["market_cap"] = market_cap
+            # 转换为亿元
+            item["market_cap_yi"] = round(market_cap / 1e8, 2)
+
+        # 获取申万行业信息
+        sw_info = sw_industries.get(ts_code)
+        if sw_info:
+            item["sw_industry"] = sw_info
+
+        result_stocks.append(item)
+
+    return {
+        "total": total_stocks,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "stocks": result_stocks
+    }
+
+
 @app.get("/api/atr/stable-periods/{ts_code}", response_model=StablePeriodResponse)
 async def get_stock_stable_periods(
     ts_code: str = Path(..., description="股票代码，如 '000001.SZ'"),
@@ -654,20 +1060,6 @@ async def get_stock_stable_periods(
     )
 
 
-@app.get("/api/atr/stable-periods/index")
-async def get_stable_periods_index():
-    """
-    获取所有已计算稳定期的股票列表
-    
-    返回所有已有中低波动稳定期数据的股票代码。
-    """
-    stocks = get_all_stocks_with_stable_periods()
-    return {
-        "total": len(stocks),
-        "stocks": stocks
-    }
-
-
 @app.post("/api/atr/stable-periods/recalculate")
 async def recalculate_stable_periods(
     window: int = Query(20, ge=2, le=100),
@@ -677,11 +1069,11 @@ async def recalculate_stable_periods(
 ):
     """
     触发全量重新计算所有股票的稳定期
-    
+
     这是一个耗时操作，会在后台批量处理所有股票。
     """
     import asyncio
-    
+
     def run_detection():
         return detect_and_save_all_stocks(
             window=window,
@@ -689,15 +1081,429 @@ async def recalculate_stable_periods(
             min_stable_days=min_stable_days,
             lookback_period=lookback_period
         )
-    
+
     # 在线程池中运行（避免阻塞）
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(executor, run_detection)
-    
+
     return {
         "status": "started",
         "message": f"全量计算已启动，共 {result.get('total_stocks', 0)} 只股票",
         "result": result
+    }
+
+
+@app.post("/api/market-cap/preheat")
+async def preheat_market_cap():
+    """
+    预热市值缓存
+
+    批量计算所有股票的市值并存入Redis缓存，提高后续查询性能。
+    这是一个耗时操作，首次调用或缓存过期后需要运行。
+    """
+    import asyncio
+
+    def run_preheat():
+        return preheat_market_cap_cache()
+
+    # 在线程池中运行（避免阻塞）
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(executor, run_preheat)
+
+    return {
+        "status": "completed",
+        "message": f"市值缓存预热完成，共缓存 {result} 只股票的市值",
+        "cached_count": result
+    }
+
+
+# ============== 涨停跌停主题分析API ==============
+
+@app.get("/api/limit/{ts_code}", response_model=LimitPriceInfoResponse)
+async def get_stock_limit_info_endpoint(
+    ts_code: str = Path(..., description="股票代码，如 '000001.SZ'"),
+    use_cache: bool = Query(True, description="是否使用Redis缓存数据")
+):
+    """
+    获取个股的涨停跌停信息
+
+    返回个股的涨停/跌停信息，包括：
+    - 最近涨停日期和涨停价格 (SMLP)
+    - 最近跌停日期和跌停价格
+    - 最近收盘价
+    - 收盘价/涨停价比 (SM_PRE_UP)
+    - 收盘价/跌停价比 (SM_PRE_DOWN)
+
+    **核心概念：**
+    - SMLP (STOCK_MAX_LASTEST_PRICE): 最近一次涨停的价格
+    - SM_PRE: 最近收盘价与SMLP的比值 = 最近收盘价 / SMLP
+      - SM_PRE > 1: 当前收盘价高于上次涨停价
+      - SM_PRE < 1: 当前收盘价低于上次涨停价
+    - 跌停逻辑类似
+
+    **返回示例：**
+    ```json
+    {
+        "ts_code": "000001.SZ",
+        "limit_up_date": "2024-01-15",
+        "limit_up_price": 10.50,
+        "limit_down_date": null,
+        "limit_down_price": null,
+        "latest_close": 11.20,
+        "sm_pre_up": 1.0667,
+        "sm_pre_down": null
+    }
+    ```
+    """
+    # 优先从Redis获取
+    if use_cache:
+        cached = get_limit_info_from_redis(ts_code)
+        if cached:
+            return LimitPriceInfoResponse(
+                ts_code=cached.ts_code,
+                limit_up_date=cached.limit_up_date,
+                limit_up_price=cached.limit_up_price,
+                limit_down_date=cached.limit_down_date,
+                limit_down_price=cached.limit_down_price,
+                latest_close=cached.latest_close,
+                sm_pre_up=cached.sm_pre_up,
+                sm_pre_down=cached.sm_pre_down
+            )
+
+    # 从数据库计算
+    info = get_stock_limit_info(ts_code, use_cache=False)
+
+    if info is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"未找到股票 {ts_code} 的数据"
+        )
+
+    # 如果启用缓存，保存到Redis
+    if use_cache:
+        save_limit_info_to_redis(info)
+
+    return LimitPriceInfoResponse(
+        ts_code=info.ts_code,
+        limit_up_date=info.limit_up_date,
+        limit_up_price=info.limit_up_price,
+        limit_down_date=info.limit_down_date,
+        limit_down_price=info.limit_down_price,
+        latest_close=info.latest_close,
+        sm_pre_up=info.sm_pre_up,
+        sm_pre_down=info.sm_pre_down
+    )
+
+
+@app.get("/api/limit/list/{limit_type}", response_model=LimitStockListResponse)
+async def get_limit_stock_list(
+    limit_type: str = Path(
+        ...,
+        pattern="^(up|down)$",
+        description="类型: up(涨停) 或 down(跌停)"
+    )
+):
+    """
+    获取所有有涨停/跌停记录的股票代码列表
+
+    从Redis中获取所有曾经涨停或跌停的股票代码列表。
+
+    **返回示例：**
+    ```json
+    {
+        "limit_type": "up",
+        "total": 150,
+        "ts_codes": ["000001.SZ", "000002.SZ", "600000.SH"]
+    }
+    ```
+    """
+    ts_codes = get_all_limit_stock_codes(limit_type)
+
+    return LimitStockListResponse(
+        limit_type=limit_type,
+        total=len(ts_codes),
+        ts_codes=ts_codes
+    )
+
+
+@app.post("/api/limit/recalculate")
+async def recalculate_all_stocks_limit(
+    num_threads: int = Query(4, ge=1, le=16, description="计算线程数")
+):
+    """
+    触发全量重新计算所有股票的涨停跌停信息
+
+    这是一个耗时操作，会在后台批量处理所有股票。
+
+    **参数说明：**
+    - num_threads: 并行计算的线程数，建议值为4-8
+
+    **返回示例：**
+    ```json
+    {
+        "status": "started",
+        "total_stocks": 5000,
+        "limit_up_count": 3200,
+        "limit_down_count": 1800,
+        "message": "全量计算已启动"
+    }
+    ```
+    """
+    import asyncio
+
+    def run_calculation():
+        results = calculate_limit_prices_for_all_stocks(num_threads=num_threads)
+
+        # 统计有涨停/跌停的股票数量
+        limit_up_count = sum(1 for r in results if r.limit_up_date)
+        limit_down_count = sum(1 for r in results if r.limit_down_date)
+
+        return {
+            "total_stocks": len(results),
+            "limit_up_count": limit_up_count,
+            "limit_down_count": limit_down_count
+        }
+
+    # 在线程池中运行（避免阻塞）
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(executor, run_calculation)
+
+    return {
+        "status": "completed",
+        "total_stocks": result["total_stocks"],
+        "limit_up_count": result["limit_up_count"],
+        "limit_down_count": result["limit_down_count"],
+        "message": f"全量计算完成，共处理 {result['total_stocks']} 只股票"
+    }
+
+
+@app.get("/api/limit/summary")
+async def get_limit_summary():
+    """
+    获取涨停跌停汇总统计
+
+    返回当前系统中涨停/跌停股票的统计信息。
+
+    **返回示例：**
+    ```json
+    {
+        "limit_up_count": 3200,
+        "limit_down_count": 1800,
+        "total_analyzed": 5000
+    }
+    ```
+    """
+    # 获取涨停和跌停的股票列表
+    up_codes = get_all_limit_stock_codes("up")
+    down_codes = get_all_limit_stock_codes("down")
+
+    # 获取去重后的总数
+    all_codes = set(up_codes) | set(down_codes)
+
+    return {
+        "limit_up_count": len(up_codes),
+        "limit_down_count": len(down_codes),
+        "total_analyzed": len(all_codes)
+    }
+
+
+# ============== 成交量主题分析API ==============
+
+@app.get("/api/volume/lowest-price/{ts_code}", response_model=LowestPriceVolumeResponse)
+async def get_stock_lowest_price_volume_endpoint(
+    ts_code: str = Path(..., description="股票代码，如 '000001.SZ'"),
+    use_cache: bool = Query(True, description="是否使用Redis缓存数据")
+):
+    """
+    获取个股的历史最低价成交量信息
+
+    计算历史最低价前后一个月的日均成交量：
+    - 找到股票的历史最低价日期
+    - 获取该日期前一个月（约22个交易日）和后一个月的交易数据
+    - 计算这两个月的日均成交量
+
+    **返回示例：**
+    ```json
+    {
+        "ts_code": "000001.SZ",
+        "lowest_price": 8.50,
+        "lowest_price_date": "2022-04-27",
+        "pre_month_start": "2022-03-28",
+        "pre_month_end": "2022-04-27",
+        "pre_month_avg_volume": 1250000,
+        "pre_month_trading_days": 22,
+        "post_month_start": "2022-04-27",
+        "post_month_end": "2022-05-26",
+        "post_month_avg_volume": 1380000,
+        "post_month_trading_days": 21,
+        "total_avg_volume": 1315000,
+        "total_trading_days": 43
+    }
+    ```
+    """
+    # 优先从Redis获取
+    if use_cache:
+        cached = get_lowest_price_volume_from_redis(ts_code)
+        if cached:
+            return LowestPriceVolumeResponse(
+                ts_code=cached.ts_code,
+                lowest_price=cached.lowest_price,
+                lowest_price_date=cached.lowest_price_date,
+                pre_month_start=cached.pre_month_start,
+                pre_month_end=cached.pre_month_end,
+                pre_month_avg_volume=cached.pre_month_avg_volume,
+                pre_month_trading_days=cached.pre_month_trading_days,
+                post_month_start=cached.post_month_start,
+                post_month_end=cached.post_month_end,
+                post_month_avg_volume=cached.post_month_avg_volume,
+                post_month_trading_days=cached.post_month_trading_days,
+                total_avg_volume=cached.total_avg_volume,
+                total_trading_days=cached.total_trading_days
+            )
+
+    # 从数据库计算
+    info = get_stock_lowest_price_volume(ts_code, use_cache=False)
+
+    if info is None or (info.lowest_price is None and info.lowest_price_date is None):
+        raise HTTPException(
+            status_code=404,
+            detail=f"未找到股票 {ts_code} 的数据"
+        )
+
+    # 如果启用缓存，保存到Redis
+    if use_cache:
+        save_lowest_price_volume_to_redis(info)
+
+    return LowestPriceVolumeResponse(
+        ts_code=info.ts_code,
+        lowest_price=info.lowest_price,
+        lowest_price_date=info.lowest_price_date,
+        pre_month_start=info.pre_month_start,
+        pre_month_end=info.pre_month_end,
+        pre_month_avg_volume=info.pre_month_avg_volume,
+        pre_month_trading_days=info.pre_month_trading_days,
+        post_month_start=info.post_month_start,
+        post_month_end=info.post_month_end,
+        post_month_avg_volume=info.post_month_avg_volume,
+        post_month_trading_days=info.post_month_trading_days,
+        total_avg_volume=info.total_avg_volume,
+        total_trading_days=info.total_trading_days
+    )
+
+
+@app.get("/api/volume/limit-up/{ts_code}", response_model=LimitUpVolumeResponse)
+async def get_stock_limit_up_volume_endpoint(
+    ts_code: str = Path(..., description="股票代码，如 '000001.SZ'"),
+    use_cache: bool = Query(True, description="是否使用Redis缓存数据")
+):
+    """
+    获取个股的涨停后成交量信息
+
+    计算最近一次涨停后累计成交量和日均成交量占涨停当日成交量的比值：
+    - 找到最近一次涨停的日期和当日成交量
+    - 计算从涨停日到最新交易日的后续累计成交量
+    - 计算涨停后的日均成交量
+    - 计算涨停后日均成交量 / 涨停当日成交量的比值
+
+    **返回示例：**
+    ```json
+    {
+        "ts_code": "000001.SZ",
+        "limit_up_date": "2024-01-15",
+        "limit_up_price": 10.50,
+        "limit_up_volume": 2500000,
+        "days_since_limit_up": 20,
+        "cumulative_volume": 35000000,
+        "post_limit_avg_volume": 1750000,
+        "volume_ratio": 0.70
+    }
+    ```
+    """
+    # 优先从Redis获取
+    if use_cache:
+        cached = get_limit_up_volume_from_redis(ts_code)
+        if cached:
+            return LimitUpVolumeResponse(
+                ts_code=cached.ts_code,
+                limit_up_date=cached.limit_up_date,
+                limit_up_price=cached.limit_up_price,
+                limit_up_volume=cached.limit_up_volume,
+                days_since_limit_up=cached.days_since_limit_up,
+                cumulative_volume=cached.cumulative_volume,
+                post_limit_avg_volume=cached.post_limit_avg_volume,
+                volume_ratio=cached.volume_ratio
+            )
+
+    # 从数据库计算
+    info = get_stock_limit_up_volume(ts_code, use_cache=False)
+
+    if info is None or info.limit_up_date is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"未找到股票 {ts_code} 的涨停数据"
+        )
+
+    # 如果启用缓存，保存到Redis
+    if use_cache:
+        save_limit_up_volume_to_redis(info)
+
+    return LimitUpVolumeResponse(
+        ts_code=info.ts_code,
+        limit_up_date=info.limit_up_date,
+        limit_up_price=info.limit_up_price,
+        limit_up_volume=info.limit_up_volume,
+        days_since_limit_up=info.days_since_limit_up,
+        cumulative_volume=info.cumulative_volume,
+        post_limit_avg_volume=info.post_limit_avg_volume,
+        volume_ratio=info.volume_ratio
+    )
+
+
+@app.post("/api/volume/recalculate")
+async def recalculate_all_stocks_volume(
+    num_threads: int = Query(4, ge=1, le=16, description="计算线程数")
+):
+    """
+    触发全量重新计算所有股票的成交量信息
+
+    这是一个耗时操作，会在后台批量处理所有股票。
+    同时计算：
+    1. 历史最低价前后一个月的日均成交量
+    2. 最近一次涨停后累计成交量和日均成交量占比
+
+    **参数说明：**
+    - num_threads: 并行计算的线程数，建议值为4-8
+
+    **返回示例：**
+    ```json
+    {
+        "status": "started",
+        "total_stocks": 5000,
+        "message": "全量计算已启动"
+    }
+    ```
+    """
+    import asyncio
+
+    def run_calculation():
+        # 计算历史最低价成交量
+        results1 = calculate_lowest_price_volume_for_all_stocks(num_threads=num_threads)
+        # 计算涨停后成交量
+        results2 = calculate_limit_up_volume_for_all_stocks(num_threads=num_threads)
+
+        return {
+            "lowest_price_volume_count": len(results1),
+            "limit_up_volume_count": len(results2)
+        }
+
+    # 在线程池中运行（避免阻塞）
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(executor, run_calculation)
+
+    return {
+        "status": "completed",
+        "total_stocks": result["lowest_price_volume_count"],
+        "message": f"全量计算完成，共处理 {result['lowest_price_volume_count']} 只股票的历史最低价成交量和 {result['limit_up_volume_count']} 只股票的涨停后成交量"
     }
 
 
@@ -825,10 +1631,16 @@ async def get_stock_rank(
                 
                 # 获取当前页数据
                 page_data = cached_data[start_idx:end_idx]
+
+                # 批量获取股票名称
+                page_ts_codes = [item["ts_code"] for item in page_data]
+                stock_names = get_stock_names_batch(page_ts_codes)
+
                 rankings = [
                     StockRankItem(
                         rank=start_idx + i + 1,
                         ts_code=item["ts_code"],
+                        stock_name=stock_names.get(item["ts_code"]),
                         return_rate=item["return_rate"],
                         max_drawdown_rebound=item.get("max_drawdown_rebound"),
                         price_range_return_rate=item.get("price_range_return_rate")
@@ -856,12 +1668,13 @@ async def get_stock_rank(
     ts_codes = get_all_ts_codes()
     logger.info(f"获取到 {len(ts_codes)} 只股票")
     
-    # 阶段1：使用SQL批量计算涨跌幅（极速）
-    logger.info("阶段1：使用SQL批量计算涨跌幅...")
+    # 阶段1：使用SQL批量计算涨跌幅（多线程版本）
+    logger.info("阶段1：使用SQL批量计算涨跌幅（多线程版本）...")
     phase1_start = time.time()
-    
+
     access = StockDataAccess()
-    results_df = access.get_stock_returns_in_range(start_date, end_date, direction)
+    # 使用4个线程并行计算，可以根据服务器配置调整
+    results_df = access.get_stock_returns_in_range(start_date, end_date, direction, num_threads=4)
     
     # 转换为列表格式
     raw_results = []
@@ -958,10 +1771,16 @@ async def get_stock_rank(
     
     # 获取当前页数据
     page_data = raw_results[start_idx:end_idx]
+
+    # 批量获取股票名称
+    page_ts_codes = [item["ts_code"] for item in page_data]
+    stock_names = get_stock_names_batch(page_ts_codes)
+
     rankings = [
         StockRankItem(
             rank=start_idx + i + 1,
             ts_code=item["ts_code"],
+            stock_name=stock_names.get(item["ts_code"]),
             return_rate=item["return_rate"],
             max_drawdown_rebound=item.get("max_drawdown_rebound"),
             price_range_return_rate=item.get("price_range_return_rate")
@@ -1074,6 +1893,101 @@ async def get_sw_industry_list(
     except Exception as e:
         logger.error(f"获取申万行业列表失败: {e}")
         raise HTTPException(status_code=500, detail=f"获取申万行业列表失败: {str(e)}")
+
+
+@app.get("/api/sw/industry-stocks")
+async def get_industry_stocks(
+    node_code: str = Query(..., description="申万行业节点代码，如 '801010'(一级), '801020'(二级), '801030'(三级)"),
+    level: int = Query(None, ge=1, le=3, description="行业层级: 1=一级, 2=二级, 3=三级。不传则按node_code精确匹配"),
+    page: int = Query(1, ge=1, description="页码，从1开始"),
+    page_size: int = Query(50, ge=1, le=500, description="每页数量")
+):
+    """
+    根据申万行业节点代码获取对应的股票代码列表
+
+    支持按一级、二级、三级行业节点查询：
+    - 传入一级节点代码(如801010)，返回该一级行业下所有股票
+    - 传入二级节点代码(如801020)，返回该二级行业下所有股票
+    - 传入三级节点代码(如801030)，返回该三级行业下所有股票
+
+    **参数说明：**
+    - node_code: 行业节点代码
+    - level: 行业层级（可选，不传则按node_code精确匹配）
+    - page: 页码（默认1）
+    - page_size: 每页数量（默认50，最大500）
+
+    **返回示例：**
+    ```json
+    {
+        "status": "success",
+        "node_code": "801010",
+        "level": 1,
+        "total": 100,
+        "page": 1,
+        "page_size": 50,
+        "total_pages": 2,
+        "stocks": [
+            {
+                "ts_code": "000001.SZ",
+                "stock_name": "平安银行"
+            }
+        ]
+    }
+    ```
+    """
+    try:
+        # 获取行业股票
+        df = SwStockQueryService.get_industry_stocks(node_code, level=level, is_latest=True)
+
+        if df is None or df.empty:
+            return {
+                "status": "success",
+                "node_code": node_code,
+                "level": level,
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 0,
+                "stocks": []
+            }
+
+        # 获取股票代码列表
+        ts_codes = df['ts_code'].unique().tolist()
+
+        # 计算总数和分页
+        total_stocks = len(ts_codes)
+        total_pages = (total_stocks + page_size - 1) // page_size
+        start_idx = (page - 1) * page_size
+        end_idx = min(start_idx + page_size, total_stocks)
+
+        # 获取当前页的股票代码
+        page_ts_codes = ts_codes[start_idx:end_idx]
+
+        # 批量获取股票名称
+        stock_names = get_stock_names_batch(page_ts_codes)
+
+        # 组装结果
+        stocks = []
+        for ts_code in page_ts_codes:
+            stock_info = {"ts_code": ts_code}
+            stock_name = stock_names.get(ts_code)
+            if stock_name:
+                stock_info["stock_name"] = stock_name
+            stocks.append(stock_info)
+
+        return {
+            "status": "success",
+            "node_code": node_code,
+            "level": level,
+            "total": total_stocks,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "stocks": stocks
+        }
+    except Exception as e:
+        logger.error(f"获取行业股票列表失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取行业股票列表失败: {str(e)}")
 
 
 # ============== 启动服务 ==============

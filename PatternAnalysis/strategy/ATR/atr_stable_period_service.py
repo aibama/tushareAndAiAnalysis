@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 
 from PatternAnalysis.config import REDIS_CONFIG, DB_CONFIG
+from PatternAnalysis.data_access import get_engine
 from PatternAnalysis.strategy.ATR.adaptive_threshold import (
     detect_stable_periods_adaptive,
     StablePeriod,
@@ -50,6 +51,357 @@ def get_redis_client():
     except Exception as e:
         logger.error(f"Redis连接失败: {e}")
         return None
+
+
+# ============== 市值计算相关 ==============
+
+# Redis缓存键前缀
+MARKET_CAP_CACHE_PREFIX = f"{REDIS_CONFIG.get('key_prefix', 'stock_rank:')}market_cap:"
+MARKET_CAP_CACHE_TTL = 3600 * 4  # 4小时缓存
+
+
+def _get_redis_client():
+    """获取Redis客户端（用于市值缓存）"""
+    try:
+        import redis
+        return redis.Redis(
+            host=REDIS_CONFIG["host"],
+            port=REDIS_CONFIG["port"],
+            db=REDIS_CONFIG.get("db", 0),
+            password=REDIS_CONFIG.get("password"),
+            decode_responses=True
+        )
+    except Exception as e:
+        logger.error(f"Redis连接失败: {e}")
+        return None
+
+
+def get_cached_market_cap(ts_code: str) -> Optional[float]:
+    """
+    从Redis缓存获取股票市值
+
+    Args:
+        ts_code: 股票代码
+
+    Returns:
+        缓存的市值，如果没有缓存返回None
+    """
+    client = _get_redis_client()
+    if client is None:
+        return None
+
+    try:
+        cache_key = f"{MARKET_CAP_CACHE_PREFIX}{ts_code}"
+        cached = client.get(cache_key)
+        if cached:
+            return float(cached)
+    except Exception as e:
+        logger.warning(f"获取市值缓存失败: {e}")
+
+    return None
+
+
+def set_cached_market_cap(ts_code: str, market_cap: float) -> bool:
+    """
+    将股票市值存入Redis缓存
+
+    Args:
+        ts_code: 股票代码
+        market_cap: 市值
+
+    Returns:
+        是否缓存成功
+    """
+    client = _get_redis_client()
+    if client is None:
+        return False
+
+    try:
+        cache_key = f"{MARKET_CAP_CACHE_PREFIX}{ts_code}"
+        client.setex(cache_key, MARKET_CAP_CACHE_TTL, str(market_cap))
+        return True
+    except Exception as e:
+        logger.warning(f"设置市值缓存失败: {e}")
+        return False
+
+
+def calculate_stock_market_cap(ts_code: str) -> Optional[float]:
+    """
+    计算股票总市值（带缓存）
+
+    市值 = pre_close * total_shares
+    - pre_close: 最近一个交易日的收盘价（来自stocktradetodayinfo表）
+    - total_shares: 总股本（来自stock_trade_info表）
+
+    Args:
+        ts_code: 股票代码
+
+    Returns:
+        总市值（元），如果计算失败返回None
+    """
+    # 先尝试从缓存获取
+    cached_cap = get_cached_market_cap(ts_code)
+    if cached_cap is not None:
+        return cached_cap
+
+    # 缓存未命中，从数据库计算
+    engine = get_engine()
+    if engine is None:
+        return None
+
+    try:
+        from sqlalchemy import text
+
+        # 获取最近一个交易日的pre_close
+        sql_price = """
+            SELECT pre_close
+            FROM stocktradetodayinfo
+            WHERE ts_code = :ts_code
+            ORDER BY trade_date DESC
+            LIMIT 1
+        """
+
+        # 获取总股本
+        sql_shares = """
+            SELECT total_shares
+            FROM stock_trade_info
+            WHERE stock_code = :ts_code
+            LIMIT 1
+        """
+
+        with engine.connect() as conn:
+            # 获取收盘价
+            df_price = pd.read_sql(text(sql_price), conn, params={"ts_code": ts_code})
+            if df_price.empty or df_price['pre_close'].iloc[0] is None:
+                logger.warning(f"股票 {ts_code} 无收盘价数据")
+                return None
+
+            pre_close = float(df_price['pre_close'].iloc[0])
+
+            # 获取总股本
+            df_shares = pd.read_sql(text(sql_shares), conn, params={"ts_code": ts_code})
+            if df_shares.empty or df_shares['total_shares'].iloc[0] is None:
+                logger.warning(f"股票 {ts_code} 无总股本数据")
+                return None
+
+            total_shares = float(df_shares['total_shares'].iloc[0])
+
+            # 计算市值
+            market_cap = pre_close * total_shares
+
+            # 存入缓存
+            set_cached_market_cap(ts_code, market_cap)
+
+            return market_cap
+
+    except Exception as e:
+        logger.error(f"计算股票 {ts_code} 市值失败: {e}")
+        return None
+
+
+def calculate_stocks_market_cap_by_codes(ts_codes: List[str]) -> Dict[str, float]:
+    """
+    批量计算股票市值（带缓存优化 + 多线程并行）
+
+    优化策略：
+    1. 先从Redis缓存获取
+    2. 对于缓存未命中的股票，使用多线程并行查询数据库
+    3. 将新查询的结果存入缓存
+
+    Args:
+        ts_codes: 股票代码列表
+
+    Returns:
+        字典，键为股票代码，值为市值
+    """
+    if not ts_codes:
+        return {}
+
+    result = {}
+    uncached_codes = []
+
+    # 1. 先从缓存获取
+    client = _get_redis_client()
+    if client:
+        try:
+            cache_keys = [f"{MARKET_CAP_CACHE_PREFIX}{code}" for code in ts_codes]
+            cached_values = client.mget(cache_keys)
+
+            for i, ts_code in enumerate(ts_codes):
+                if cached_values[i] is not None:
+                    result[ts_code] = float(cached_values[i])
+                else:
+                    uncached_codes.append(ts_code)
+        except Exception as e:
+            logger.warning(f"批量获取市值缓存失败: {e}")
+            uncached_codes = list(ts_codes)
+    else:
+        uncached_codes = list(ts_codes)
+
+    # 2. 如果有未缓存的股票，使用多线程并行查询
+    if uncached_codes:
+        # 使用线程池并行处理
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # 每批处理的股票数量
+        BATCH_SIZE = 200
+        # 并行线程数
+        MAX_WORKERS = 10
+
+        def process_batch(batch_codes: List[str]) -> Dict[str, float]:
+            """处理一批股票的市值计算"""
+            batch_result = {}
+            engine = get_engine()
+            if engine is None:
+                return batch_result
+
+            try:
+                from sqlalchemy import text
+
+                placeholders = ','.join([f"'{code}'" for code in batch_codes])
+
+                # 优化SQL：使用更简单的方式获取最新收盘价
+                sql_price = f"""
+                    SELECT t.ts_code, t.pre_close
+                    FROM stocktradetodayinfo t
+                    INNER JOIN (
+                        SELECT ts_code, MAX(trade_date) as max_date
+                        FROM stocktradetodayinfo
+                        WHERE ts_code IN ({placeholders})
+                        GROUP BY ts_code
+                    ) latest ON t.ts_code = latest.ts_code AND t.trade_date = latest.max_date
+                """
+
+                sql_shares = f"""
+                    SELECT stock_code as ts_code, total_shares
+                    FROM stock_trade_info
+                    WHERE stock_code IN ({placeholders})
+                """
+
+                with engine.connect() as conn:
+                    df_price = pd.read_sql(text(sql_price), conn)
+                    df_shares = pd.read_sql(text(sql_shares), conn)
+
+                if not df_price.empty and not df_shares.empty:
+                    df_price = df_price.set_index('ts_code')
+                    df_shares = df_shares.set_index('ts_code')
+
+                    for ts_code in batch_codes:
+                        if ts_code in df_price.index and ts_code in df_shares.index:
+                            pre_close = df_price.loc[ts_code, 'pre_close']
+                            total_shares = df_shares.loc[ts_code, 'total_shares']
+                            if pd.notna(pre_close) and pd.notna(total_shares):
+                                batch_result[ts_code] = float(pre_close) * float(total_shares)
+
+            except Exception as e:
+                logger.error(f"批量计算股票市值失败: {e}")
+
+            return batch_result
+
+        # 将未缓存的股票分成多批
+        batches = [uncached_codes[i:i+BATCH_SIZE] for i in range(0, len(uncached_codes), BATCH_SIZE)]
+
+        logger.info(f"开始并行计算市值，共 {len(uncached_codes)} 只股票，分 {len(batches)} 批，{MAX_WORKERS} 线程")
+
+        # 使用线程池并行处理
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(process_batch, batch): batch for batch in batches}
+
+            for future in as_completed(futures):
+                try:
+                    batch_result = future.result()
+                    result.update(batch_result)
+
+                    # 存入缓存
+                    if client:
+                        try:
+                            pipe = client.pipeline()
+                            for ts_code, market_cap in batch_result.items():
+                                pipe.setex(
+                                    f"{MARKET_CAP_CACHE_PREFIX}{ts_code}",
+                                    MARKET_CAP_CACHE_TTL,
+                                    str(market_cap)
+                                )
+                            pipe.execute()
+                        except Exception as e:
+                            logger.warning(f"批量设置市值缓存失败: {e}")
+                except Exception as e:
+                    logger.error(f"处理批次失败: {e}")
+
+    return result
+
+
+# market_factor与市值范围的映射（单位：元）
+MARKET_FACTOR_RANGES = {
+    "0Y-100Y": (0, 100 * 1e8),          # 一百亿以下
+    "100Y-200Y": (100 * 1e8, 200 * 1e8),  # 一百亿至两百亿
+    "200Y-400Y": (200 * 1e8, 400 * 1e8),  # 两百亿至四百亿
+    "400Y-3000000Y": (400 * 1e8, 3000000 * 1e8),  # 四百亿以上
+}
+
+
+def preheat_market_cap_cache(ts_codes: List[str] = None, batch_size: int = 500) -> int:
+    """
+    预热市值缓存（批量计算并存入Redis）
+
+    可以在服务启动时或定时任务中调用，提前将所有股票的市值存入缓存
+
+    Args:
+        ts_codes: 股票代码列表，None表示获取所有股票
+        batch_size: 每批处理的股票数量
+
+    Returns:
+        成功缓存的股票数量
+    """
+    from PatternAnalysis.data_access import get_all_ts_codes
+
+    if ts_codes is None:
+        ts_codes = get_all_ts_codes()
+
+    logger.info(f"开始预热市值缓存，共 {len(ts_codes)} 只股票")
+
+    # 批量计算并缓存
+    cached_count = 0
+    for i in range(0, len(ts_codes), batch_size):
+        batch = ts_codes[i:i + batch_size]
+        result = calculate_stocks_market_cap_by_codes(batch)
+        cached_count += len(result)
+
+        if (i + batch_size) % 1000 == 0:
+            logger.info(f"市值缓存预热进度: {min(i + batch_size, len(ts_codes))}/{len(ts_codes)}")
+
+    logger.info(f"市值缓存预热完成，共缓存 {cached_count} 只股票的市值")
+    return cached_count
+
+
+def filter_stocks_by_market_factor(ts_codes: List[str], market_factor: str) -> List[str]:
+    """
+    根据市值范围筛选股票
+
+    Args:
+        ts_codes: 股票代码列表
+        market_factor: 市值因子，如 "0Y-100Y", "100Y-200Y" 等
+
+    Returns:
+        符合条件的股票代码列表
+    """
+    if market_factor not in MARKET_FACTOR_RANGES:
+        logger.warning(f"未知的市值因子: {market_factor}")
+        return ts_codes
+
+    min_cap, max_cap = MARKET_FACTOR_RANGES[market_factor]
+
+    # 批量计算市值（带缓存）
+    market_caps = calculate_stocks_market_cap_by_codes(ts_codes)
+
+    # 筛选符合条件的股票
+    result = []
+    for ts_code, cap in market_caps.items():
+        if min_cap <= cap < max_cap:
+            result.append(ts_code)
+
+    logger.info(f"市值因子 {market_factor} 筛选: 原始 {len(ts_codes)} 只，筛选后 {len(result)} 只")
+    return result
 
 
 # ============== 数据模型 ==============
@@ -352,11 +704,26 @@ def get_stable_periods_from_redis(ts_code: str) -> Optional[Dict]:
     
     try:
         hash_key = f"{STABLE_PERIOD_HASH_PREFIX}{ts_code}"
-        data_str = client.hget(hash_key, "data")
         
-        if data_str:
-            return json.loads(data_str)
-        return None
+        # 检查key是否存在以及其类型
+        key_type = client.type(hash_key)
+        
+        if key_type == 'none':
+            # key不存在
+            return None
+        elif key_type == 'hash':
+            # 正常情况：key是Hash类型
+            data_str = client.hget(hash_key, "data")
+            if data_str:
+                return json.loads(data_str)
+            return None
+        else:
+            # key类型不正确
+            logger.warning(f"Redis key {hash_key} 类型错误 (当前类型: {key_type})，尝试修复...")
+            # 删除错误的key
+            client.delete(hash_key)
+            logger.info(f"已删除错误的Redis key {hash_key}")
+            return None
         
     except Exception as e:
         logger.error(f"从Redis获取稳定期数据失败: {e}")
@@ -371,7 +738,32 @@ def get_all_stocks_with_stable_periods() -> List[str]:
     
     try:
         index_key = f"{STABLE_PERIOD_HASH_PREFIX}index"
-        return list(client.smembers(index_key))
+        
+        # 检查key是否存在以及其类型
+        key_type = client.type(index_key)
+        
+        if key_type == 'none':
+            # key不存在，返回空列表
+            logger.warning(f"Redis key {index_key} 不存在，需要先运行稳定期计算任务")
+            return []
+        elif key_type == 'set':
+            # 正常情况：key是Set类型
+            return list(client.smembers(index_key))
+        else:
+            # key类型不正确，尝试修复
+            logger.warning(f"Redis key {index_key} 类型错误 (当前类型: {key_type})，尝试修复...")
+            
+            # 获取当前值
+            current_value = client.get(index_key)
+            if current_value:
+                # 如果是字符串类型，可能之前存储了错误的数据
+                logger.error(f"Redis key {index_key} 存储了错误的数据: {current_value[:100]}...")
+            
+            # 删除错误的key
+            client.delete(index_key)
+            logger.info(f"已删除错误的Redis key {index_key}，请重新运行稳定期计算任务")
+            return []
+            
     except Exception as e:
         logger.error(f"获取股票索引失败: {e}")
         return []

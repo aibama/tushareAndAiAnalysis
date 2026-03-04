@@ -96,7 +96,94 @@ GET /health
 }
 ```
 
-### 2. 获取形态分类结果
+### 2. 成交量主题分析 - 历史最低价成交量
+
+```http
+GET /api/volume/lowest-price/{ts_code}
+```
+
+参数:
+- `ts_code`: 股票代码 (如 000001.SZ)
+- `use_cache`: 是否使用缓存 (默认true)
+
+响应:
+```json
+{
+    "ts_code": "000001.SZ",
+    "lowest_price": 8.50,
+    "lowest_price_date": "2022-04-27",
+    "pre_month_start": "2022-03-28",
+    "pre_month_end": "2022-04-27",
+    "pre_month_avg_volume": 1250000,
+    "pre_month_trading_days": 22,
+    "post_month_start": "2022-04-27",
+    "post_month_end": "2022-05-26",
+    "post_month_avg_volume": 1380000,
+    "post_month_trading_days": 21,
+    "total_avg_volume": 1315000,
+    "total_trading_days": 43
+}
+```
+
+**字段说明:**
+- `lowest_price`: 历史最低价
+- `lowest_price_date`: 历史最低价日期
+- `pre_month_*`: 最低价前一个月的数据（约22个交易日）
+- `post_month_*`: 最低价后一个月的数据（约22个交易日）
+- `total_avg_volume`: 两个月日均成交量合计
+
+### 3. 成交量主题分析 - 涨停后成交量
+
+```http
+GET /api/volume/limit-up/{ts_code}
+```
+
+参数:
+- `ts_code`: 股票代码 (如 000001.SZ)
+- `use_cache`: 是否使用缓存 (默认true)
+
+响应:
+```json
+{
+    "ts_code": "000001.SZ",
+    "limit_up_date": "2024-01-15",
+    "limit_up_price": 10.50,
+    "limit_up_volume": 2500000,
+    "days_since_limit_up": 20,
+    "cumulative_volume": 35000000,
+    "post_limit_avg_volume": 1750000,
+    "volume_ratio": 0.70
+}
+```
+
+**字段说明:**
+- `limit_up_date`: 最近涨停日期
+- `limit_up_price`: 涨停价格
+- `limit_up_volume`: 涨停当日成交量
+- `days_since_limit_up`: 距今天数（交易日）
+- `cumulative_volume`: 涨停后累计成交量
+- `post_limit_avg_volume`: 涨停后日均成交量
+- `volume_ratio`: 涨停后日均成交量/涨停当日成交量比值
+
+### 4. 触发全量成交量计算
+
+```http
+POST /api/volume/recalculate?num_threads=4
+```
+
+参数:
+- `num_threads`: 并行计算的线程数 (默认4, 最大16)
+
+响应:
+```json
+{
+    "status": "completed",
+    "total_stocks": 5000,
+    "message": "全量计算完成，共处理 5000 只股票的历史最低价成交量和 5000 只股票的涨停后成交量"
+}
+```
+
+### 5. 获取形态分类结果
 
 ```http
 GET /api/patterns?period_type=3m

@@ -114,15 +114,15 @@ class SwStockQueryService:
     def get_stock_industry(ts_code: str) -> List[Dict]:
         """
         获取股票当前所属的申万行业
-        
+
         参数:
             ts_code: 股票代码
-            
+
         Returns:
             List[Dict]: 行业信息列表（可能有多条，比如同时属于多个三级行业）
         """
         sql = """
-            SELECT 
+            SELECT
                 r.ts_code,
                 r.sw_node_code,
                 r.in_date,
@@ -142,10 +142,69 @@ class SwStockQueryService:
             ORDER BY s.level
         """
         df = query_df(sql, {'ts_code': ts_code})
-        
+
         if df is not None and not df.empty:
             return df.to_dict('records')
         return []
+
+    @staticmethod
+    def get_stocks_industry_batch(ts_codes: List[str]) -> Dict[str, Dict]:
+        """
+        批量获取多个股票当前所属的申万行业（优化版）
+
+        参数:
+            ts_codes: 股票代码列表
+
+        Returns:
+            Dict: 键为股票代码，值为行业信息字典（取最新的一条）
+        """
+        if not ts_codes:
+            return {}
+
+        # 构建IN子句
+        placeholders = ','.join([f"'{code}'" for code in ts_codes])
+
+        sql = f"""
+            SELECT
+                r.ts_code,
+                r.sw_node_code,
+                r.in_date,
+                r.out_date,
+                r.is_latest,
+                s.node_name as industry_name,
+                s.level as industry_level,
+                s.l1_code,
+                s.l1_name,
+                s.l2_code,
+                s.l2_name,
+                s.l3_code,
+                s.l3_name
+            FROM stock_sw_relation r
+            JOIN sw_industry s ON r.sw_node_code = s.node_code
+            WHERE r.ts_code IN ({placeholders}) AND r.is_latest = 1
+            ORDER BY r.ts_code, s.level
+        """
+
+        df = query_df(sql)
+
+        if df is None or df.empty:
+            return {}
+
+        # 转换为字典，每只股票只取一条（取最新的一条）
+        result = {}
+        for _, row in df.iterrows():
+            ts_code = row['ts_code']
+            if ts_code not in result:
+                result[ts_code] = {
+                    "l1_name": row.get('l1_name'),
+                    "l2_name": row.get('l2_name'),
+                    "l3_name": row.get('l3_name'),
+                    "l1_code": row.get('l1_code'),
+                    "l2_code": row.get('l2_code'),
+                    "l3_code": row.get('l3_code')
+                }
+
+        return result
     
     @staticmethod
     def get_stock_industry_history(ts_code: str) -> pd.DataFrame:
