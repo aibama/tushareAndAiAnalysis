@@ -726,6 +726,56 @@ class StablePeriodResponse(BaseModel):
     summary: Optional[Dict] = None
 
 
+# ============== 板块过滤函数 ==============
+
+def filter_stocks_by_sector(ts_codes: List[str], sector: Optional[str]) -> List[str]:
+    """
+    按板块筛选股票
+    
+    参数:
+        ts_codes: 股票代码列表
+        sector: 板块代码
+            - SH: 沪市主板 (600, 601, 603, 605)
+            - SZ: 深市主板 (000, 001, 002, 003, 004)
+            - CY: 创业板 (300, 301)
+            - KC: 科创板 (688)
+            - None/空: 不限制，返回全部
+    
+    返回:
+        筛选后的股票代码列表
+    """
+    if not ts_codes or not sector:
+        return ts_codes
+    
+    sector = sector.upper()
+    
+    # 定义各板块的股票代码前缀
+    sector_prefixes = {
+        'SH': ('600', '601', '603', '605'),  # 沪市主板
+        'SZ': ('000', '001', '002', '003', '004'),  # 深市主板
+        'CY': ('300', '301'),  # 创业板
+        'KC': ('688',)  # 科创板
+    }
+    
+    prefixes = sector_prefixes.get(sector)
+    if not prefixes:
+        # 无效的板块代码，返回全部
+        return ts_codes
+    
+    # 过滤
+    filtered = []
+    for code in ts_codes:
+        # 提取数字部分（去掉.SZ/.SH后缀）
+        prefix = code.split('.')[0] if '.' in code else code[:3]
+        # 检查是否以指定前缀开头
+        for p in prefixes:
+            if prefix.startswith(p):
+                filtered.append(code)
+                break
+    
+    return filtered
+
+
 # 注意：固定路径的index路由必须放在{ts_code}参数路由之前，否则/index会被匹配为ts_code参数
 @app.get("/api/atr/stable-periods/index")
 async def get_stable_periods_index(
@@ -736,6 +786,10 @@ async def get_stable_periods_index(
     full_path: Optional[str] = Query(
         None,
         description="申万行业分类路径筛选，如 '801010.801020.801030'"
+    ),
+    sector: Optional[str] = Query(
+        None,
+        description="板块筛选: SH(沪市主板), SZ(深市主板), CY(创业板), KC(科创板)"
     ),
     page: int = Query(1, ge=1, description="页码，从1开始"),
     page_size: int = Query(50, ge=1, le=500, description="每页数量")
@@ -879,7 +933,12 @@ async def get_stable_periods_index(
         logger.info(f"按市值筛选: market_factor={market_factor}")
         stocks = filter_stocks_by_market_factor(stocks, market_factor)
 
-    # 4. 计算总数和分页
+    # 4. 如果提供了sector参数，通过板块筛选
+    if sector:
+        logger.info(f"按板块筛选: sector={sector}")
+        stocks = filter_stocks_by_sector(stocks, sector)
+
+    # 5. 计算总数和分页
     total_stocks = len(stocks)
     total_pages = (total_stocks + page_size - 1) // page_size
     start_idx = (page - 1) * page_size
@@ -1563,6 +1622,10 @@ async def get_stock_rank(
         ...,
         description="End date"
     ),
+    sector: Optional[str] = Query(
+        None,
+        description="板块筛选: SH(沪市主板), SZ(深市主板), CY(创业板), KC(科创板)"
+    ),
     limit: int = Query(
         default=150,
         ge=1,
@@ -1612,6 +1675,12 @@ async def get_stock_rank(
         logger.info("尝试从缓存获取完整数据...")
         cached_data = get_cached_rank(direction, start_date, end_date)
         if cached_data:
+            # 如果提供了sector参数，按板块筛选
+            if sector:
+                logger.info(f"按板块筛选: sector={sector}")
+                cached_data = [r for r in cached_data if filter_stocks_by_sector([r["ts_code"]], sector)]
+                logger.info(f"板块筛选后剩余 {len(cached_data)} 只股票")
+            
             # 检查是否所有记录都有回撤/反弹数据
             all_have_metric = all(item.get("max_drawdown_rebound") is not None for item in cached_data)
             if all_have_metric:
@@ -1694,6 +1763,12 @@ async def get_stock_rank(
         raw_results.sort(key=lambda x: x["return_rate"], reverse=True)
     else:
         raw_results.sort(key=lambda x: x["return_rate"])
+    
+    # 如果提供了sector参数，按板块筛选
+    if sector:
+        logger.info(f"按板块筛选: sector={sector}")
+        raw_results = [r for r in raw_results if filter_stocks_by_sector([r["ts_code"]], sector)]
+        logger.info(f"板块筛选后剩余 {len(raw_results)} 只股票")
     
     # 缓存初步结果（无回撤/反弹）
     if use_cache:
