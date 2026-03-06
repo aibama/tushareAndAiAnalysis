@@ -779,6 +779,14 @@ def filter_stocks_by_sector(ts_codes: List[str], sector: Optional[str]) -> List[
 # 注意：固定路径的index路由必须放在{ts_code}参数路由之前，否则/index会被匹配为ts_code参数
 @app.get("/api/atr/stable-periods/index")
 async def get_stable_periods_index(
+    begin_date: Optional[date] = Query(
+        None,
+        description="开始日期，用于过滤在该时间段内有稳定期的股票"
+    ),
+    end_date: Optional[date] = Query(
+        None,
+        description="结束日期，用于过滤在该时间段内有稳定期的股票"
+    ),
     market_factor: Optional[str] = Query(
         None,
         description="市值因子筛选: 0Y-100Y(一 hundred亿以下), 100Y-200Y, 200Y-400Y, 400Y-3000000Y"
@@ -798,6 +806,8 @@ async def get_stable_periods_index(
     获取所有已计算稳定期的股票列表，支持市值和行业筛选
 
     **参数说明：**
+    - begin_date: 开始日期，用于过滤在该时间段内有稳定期的股票（包含相交、包含、被包含的情况）
+    - end_date: 结束日期，用于过滤在该时间段内有稳定期的股票（包含相交、包含、被包含的情况）
     - market_factor: 市值因子筛选
         - 0Y-100Y: 一百亿以下
         - 100Y-200Y: 一百亿至两百亿
@@ -830,6 +840,102 @@ async def get_stable_periods_index(
     """
     # 1. 获取所有有稳定期数据的股票列表
     stocks = get_all_stocks_with_stable_periods()
+
+    # 1.1 如果提供了begin_date和end_date参数，按稳定期时间段筛选
+    if begin_date and end_date:
+        logger.info(f"按稳定期时间段筛选: begin_date={begin_date}, end_date={end_date}")
+
+        # 验证日期
+        if begin_date > end_date:
+            raise HTTPException(
+                status_code=400,
+                detail="begin_date must be less than or equal to end_date"
+            )
+
+        # 用于存储符合日期条件的股票
+        filtered_stocks = []
+
+        # 批量获取所有股票的稳定期数据（优化：使用pipeline批量获取）
+        from .strategy.ATR.atr_stable_period_service import get_redis_client
+
+        redis_client = get_redis_client()
+        if redis_client:
+            try:
+                from .strategy.ATR.atr_stable_period_service import STABLE_PERIOD_HASH_PREFIX
+                import json
+
+                # 使用pipeline批量获取
+                pipe = redis_client.pipeline()
+                for ts_code in stocks:
+                    hash_key = f"{STABLE_PERIOD_HASH_PREFIX}{ts_code}"
+                    pipe.hget(hash_key, "data")
+
+                # 执行批量获取
+                results = pipe.execute()
+
+                # 遍历结果，检查是否有重叠的稳定期
+                for i, ts_code in enumerate(stocks):
+                    try:
+                        data_str = results[i]
+                        if data_str:
+                            data = json.loads(data_str)
+                            records = data.get("records", [])
+
+                            # 检查是否有任何稳定期与查询时间范围重叠
+                            # 重叠条件: stock_start <= end_date AND stock_end >= begin_date
+                            has_overlap = False
+                            for record in records:
+                                stock_start = record.get("start_date")
+                                stock_end = record.get("end_date")
+
+                                if stock_start and stock_end:
+                                    # 转换为date对象进行比较
+                                    try:
+                                        stock_start_date = datetime.strptime(stock_start, '%Y-%m-%d').date() if isinstance(stock_start, str) else stock_start
+                                        stock_end_date = datetime.strptime(stock_end, '%Y-%m-%d').date() if isinstance(stock_end, str) else stock_end
+
+                                        if stock_start_date and stock_end_date:
+                                            # 检查重叠：stock_start <= end_date AND stock_end >= begin_date
+                                            if stock_start_date <= end_date and stock_end_date >= begin_date:
+                                                has_overlap = True
+                                                break
+                                    except (ValueError, TypeError) as e:
+                                        logger.warning(f"日期解析失败 for {ts_code}: {e}")
+                                        continue
+
+                            if has_overlap:
+                                filtered_stocks.append(ts_code)
+                    except Exception as e:
+                        logger.warning(f"处理股票 {ts_code} 稳定期数据失败: {e}")
+                        continue
+
+                stocks = filtered_stocks
+                logger.info(f"按稳定期时间段筛选后股票数量: {len(stocks)}")
+
+            except Exception as e:
+                logger.error(f"批量获取稳定期数据失败: {e}")
+                # 如果批量获取失败，使用逐个获取的方式
+                filtered_stocks = []
+                for ts_code in stocks:
+                    cached_data = get_stable_periods_from_redis(ts_code)
+                    if cached_data and cached_data.get("records"):
+                        records = cached_data["records"]
+                        for record in records:
+                            stock_start = record.get("start_date")
+                            stock_end = record.get("end_date")
+                            if stock_start and stock_end:
+                                try:
+                                    stock_start_date = datetime.strptime(stock_start, '%Y-%m-%d').date() if isinstance(stock_start, str) else stock_start
+                                    stock_end_date = datetime.strptime(stock_end, '%Y-%m-%d').date() if isinstance(stock_end, str) else stock_end
+                                    if stock_start_date <= end_date and stock_end_date >= begin_date:
+                                        filtered_stocks.append(ts_code)
+                                        break
+                                except (ValueError, TypeError):
+                                    continue
+                stocks = filtered_stocks
+                logger.info(f"按稳定期时间段筛选后股票数量: {len(stocks)}")
+        else:
+            logger.warning("Redis不可用，无法按时间段筛选")
 
     # 2. 如果提供了full_path参数，通过申万概念分类筛选
     if full_path:
