@@ -4,6 +4,7 @@
 """
 import asyncio
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Query, Path, HTTPException
 from pydantic import BaseModel, Field
@@ -170,11 +171,30 @@ def _clean_nan_values(obj):
 
 
 # 创建FastAPI应用
+# 使用默认的 /docs 和 /redoc 端点（通过CDN加载Swagger UI）
 app = FastAPI(
     title=API_CONFIG["title"],
     version=API_CONFIG["version"],
-    description="提供股票形态分类、涨跌幅计算等API接口"
+    description="提供股票形态分类、涨跌幅计算等API接口",
+    docs_url="/docs",  # 启用默认的 /docs
+    redoc_url="/redoc",  # 启用默认的 /redoc
+    openapi_url="/openapi.json",
+    swagger_ui_parameters={
+        "syntaxHighlight": False,
+        "persistAuthorization": True,
+    }
 )
+
+# 禁用Swagger UI的CDN加载，强制使用本地文件
+# 这解决了部分网络环境下jsdelivr CDN无法访问的问题
+from fastapi.staticfiles import StaticFiles
+import swagger_ui_bundle
+
+# 获取swagger-ui-dist的静态文件路径 (vendor/swagger-ui-x.x.x)
+swagger_ui_path = os.path.join(os.path.dirname(swagger_ui_bundle.__file__), "vendor")
+
+# 挂载静态文件目录
+app.mount("/static/swagger-ui", StaticFiles(directory=swagger_ui_path), name="swagger-ui")
 
 
 # 初始化增量表
@@ -724,6 +744,9 @@ class StablePeriodResponse(BaseModel):
     min_stable_days: int = Field(description="查询参数min_stable_days的值，表示返回稳定期的最小天数阈值")
     stable_periods: List[StablePeriodItem]
     summary: Optional[Dict] = None
+    # 主题分析信息
+    limit_info: Optional[Dict] = Field(None, description="涨停跌停信息")
+    volume_info: Optional[Dict] = Field(None, description="涨停后成交量信息")
 
 
 # ============== 板块过滤函数 ==============
@@ -1053,7 +1076,7 @@ async def get_stable_periods_index(
     # 5. 获取当前页的股票数据
     page_stocks = stocks[start_idx:end_idx]
 
-    # 6. 批量获取市值、申万行业信息和股票名称（优化版）
+    # 6. 批量获取市值、申万行业信息、股票名称和主题数据（优化版）
     # 6.1 批量获取市值
     market_caps = calculate_stocks_market_cap_by_codes(page_stocks)
 
@@ -1064,7 +1087,62 @@ async def get_stable_periods_index(
     # 6.3 批量获取股票名称
     stock_names = get_stock_names_batch(page_stocks)
 
-    # 6.4 组装结果
+    # 6.4 批量获取涨停跌停信息（使用Redis）
+    from .strategy.theme.limit_service import get_limit_info_from_redis, LIMIT_INFO_HASH_PREFIX
+    limit_infos = {}
+    try:
+        limit_redis_client = get_limit_info_from_redis.__self__()
+        if limit_redis_client:
+            import redis as redis_lib
+            limit_client = redis_lib.Redis(
+                host=REDIS_CONFIG["host"],
+                port=REDIS_CONFIG["port"],
+                db=REDIS_CONFIG.get("db", 0),
+                password=REDIS_CONFIG.get("password"),
+                decode_responses=True
+            )
+            if limit_client:
+                pipe = limit_client.pipeline()
+                for ts_code in page_stocks:
+                    hash_key = f"{LIMIT_INFO_HASH_PREFIX}{ts_code}"
+                    pipe.hgetall(hash_key)
+                limit_results = pipe.execute()
+                for i, ts_code in enumerate(page_stocks):
+                    data = limit_results[i]
+                    if data and data.get('ts_code'):
+                        limit_infos[ts_code] = {
+                            'limit_up_date': data.get('limit_up_date') or None,
+                            'limit_up_price': float(data['limit_up_price']) if data.get('limit_up_price') else None,
+                            'limit_down_date': data.get('limit_down_date') or None,
+                            'limit_down_price': float(data['limit_down_price']) if data.get('limit_down_price') else None,
+                            'sm_pre_up': float(data['sm_pre_up']) if data.get('sm_pre_up') else None,
+                            'sm_pre_down': float(data['sm_pre_down']) if data.get('sm_pre_down') else None
+                        }
+    except Exception as e:
+        logger.warning(f"批量获取涨停跌停信息失败: {e}")
+
+    # 6.5 批量获取涨停后成交量信息（使用Redis）
+    from .strategy.theme.volume_service import VOLUME_INFO_HASH_PREFIX
+    volume_infos = {}
+    try:
+        if limit_client:
+            pipe = limit_client.pipeline()
+            for ts_code in page_stocks:
+                hash_key = f"{VOLUME_INFO_HASH_PREFIX}limit_up:{ts_code}"
+                pipe.hgetall(hash_key)
+            volume_results = pipe.execute()
+            for i, ts_code in enumerate(page_stocks):
+                data = volume_results[i]
+                if data and data.get('ts_code'):
+                    volume_infos[ts_code] = {
+                        'cumulative_volume': float(data['cumulative_volume']) if data.get('cumulative_volume') else None,
+                        'volume_ratio': float(data['volume_ratio']) if data.get('volume_ratio') else None,
+                        'days_since_limit_up': int(data['days_since_limit_up']) if data.get('days_since_limit_up') else None
+                    }
+    except Exception as e:
+        logger.warning(f"批量获取涨停后成交量信息失败: {e}")
+
+    # 6.6 组装结果
     result_stocks = []
     for ts_code in page_stocks:
         item = {"ts_code": ts_code}
@@ -1085,6 +1163,32 @@ async def get_stable_periods_index(
         sw_info = sw_industries.get(ts_code)
         if sw_info:
             item["sw_industry"] = sw_info
+
+        # 获取涨停跌停信息
+        limit_info = limit_infos.get(ts_code)
+        if limit_info:
+            if limit_info.get('limit_up_date'):
+                item["limit_up_date"] = limit_info['limit_up_date']
+            if limit_info.get('limit_up_price'):
+                item["limit_up_price"] = limit_info['limit_up_price']
+            if limit_info.get('limit_down_date'):
+                item["limit_down_date"] = limit_info['limit_down_date']
+            if limit_info.get('limit_down_price'):
+                item["limit_down_price"] = limit_info['limit_down_price']
+            if limit_info.get('sm_pre_up') is not None:
+                item["sm_pre_up"] = limit_info['sm_pre_up']
+            if limit_info.get('sm_pre_down') is not None:
+                item["sm_pre_down"] = limit_info['sm_pre_down']
+
+        # 获取涨停后成交量信息
+        volume_info = volume_infos.get(ts_code)
+        if volume_info:
+            if volume_info.get('cumulative_volume') is not None:
+                item["cumulative_volume"] = volume_info['cumulative_volume']
+            if volume_info.get('volume_ratio') is not None:
+                item["volume_ratio"] = volume_info['volume_ratio']
+            if volume_info.get('days_since_limit_up') is not None:
+                item["days_since_limit_up"] = volume_info['days_since_limit_up']
 
         result_stocks.append(item)
 
@@ -1150,12 +1254,59 @@ async def get_stock_stable_periods(
     ```
     """
     # 尝试从缓存获取
+    limit_info = None
+    volume_info = None
+
+    # 获取涨停跌停和成交量信息
+    try:
+        from .strategy.theme.limit_service import get_limit_info_from_redis, LIMIT_INFO_HASH_PREFIX
+        from .strategy.theme.volume_service import VOLUME_INFO_HASH_PREFIX
+        import redis as redis_lib
+
+        # 确保REDIS_CONFIG已导入
+        from .config import REDIS_CONFIG
+
+        limit_client = redis_lib.Redis(
+            host=REDIS_CONFIG["host"],
+            port=REDIS_CONFIG["port"],
+            db=REDIS_CONFIG.get("db", 0),
+            password=REDIS_CONFIG.get("password"),
+            decode_responses=True
+        )
+
+        # 获取涨停跌停信息
+        limit_hash_key = f"{LIMIT_INFO_HASH_PREFIX}{ts_code}"
+        limit_data = limit_client.hgetall(limit_hash_key)
+        if limit_data and limit_data.get('ts_code'):
+            limit_info = {
+                'limit_up_date': limit_data.get('limit_up_date') or None,
+                'limit_up_price': float(limit_data['limit_up_price']) if limit_data.get('limit_up_price') else None,
+                'limit_down_date': limit_data.get('limit_down_date') or None,
+                'limit_down_price': float(limit_data['limit_down_price']) if limit_data.get('limit_down_price') else None,
+                'latest_close': float(limit_data['latest_close']) if limit_data.get('latest_close') else None,
+                'sm_pre_up': float(limit_data['sm_pre_up']) if limit_data.get('sm_pre_up') else None,
+                'sm_pre_down': float(limit_data['sm_pre_down']) if limit_data.get('sm_pre_down') else None
+            }
+
+        # 获取涨停后成交量信息
+        volume_hash_key = f"{VOLUME_INFO_HASH_PREFIX}limit_up:{ts_code}"
+        volume_data = limit_client.hgetall(volume_hash_key)
+        if volume_data and volume_data.get('ts_code'):
+            volume_info = {
+                'cumulative_volume': float(volume_data['cumulative_volume']) if volume_data.get('cumulative_volume') else None,
+                'volume_ratio': float(volume_data['volume_ratio']) if volume_data.get('volume_ratio') else None,
+                'days_since_limit_up': int(volume_data['days_since_limit_up']) if volume_data.get('days_since_limit_up') else None,
+                'limit_up_date': volume_data.get('limit_up_date') or None
+            }
+    except Exception as e:
+        logger.warning(f"获取主题信息失败: {e}")
+
     if use_cache:
         cached_data = get_stable_periods_from_redis(ts_code)
         if cached_data and cached_data.get("records"):
             records_data = cached_data["records"]
             summary = cached_data.get("summary", {})
-            
+
             stable_periods = [
                 StablePeriodItem(
                     start_date=r["start_date"],
@@ -1167,10 +1318,10 @@ async def get_stock_stable_periods(
                 )
                 for r in records_data
             ]
-            
+
             # 计算max_stable_days
             max_stable_days = max((r.duration_days for r in stable_periods), default=0)
-            
+
             return StablePeriodResponse(
                 ts_code=ts_code,
                 status="cached",
@@ -1179,9 +1330,11 @@ async def get_stock_stable_periods(
                 max_stable_days=max_stable_days,
                 min_stable_days=min_stable_days,
                 stable_periods=stable_periods,
-                summary=summary
+                summary=summary,
+                limit_info=limit_info,
+                volume_info=volume_info
             )
-    
+
     # 实时计算
     records, summary = detect_stable_periods_for_stock(
         ts_code=ts_code,
@@ -1190,13 +1343,13 @@ async def get_stock_stable_periods(
         min_stable_days=min_stable_days,
         lookback_period=lookback_period
     )
-    
+
     if summary.get("status") == "insufficient_data":
         raise HTTPException(
             status_code=400,
             detail=f"数据不足: 需要至少 {summary.get('required', 241)} 个数据点，当前只有 {summary.get('data_points', 0)} 个"
         )
-    
+
     # 格式化结果
     stable_periods = [
         StablePeriodItem(
@@ -1209,10 +1362,10 @@ async def get_stock_stable_periods(
         )
         for r in records
     ]
-    
+
     # 计算max_stable_days
     max_stable_days = max((r.duration_days for r in stable_periods), default=0)
-    
+
     return StablePeriodResponse(
         ts_code=ts_code,
         status="computed",
@@ -1221,7 +1374,9 @@ async def get_stock_stable_periods(
         max_stable_days=max_stable_days,
         min_stable_days=min_stable_days,
         stable_periods=stable_periods,
-        summary=summary
+        summary=summary,
+        limit_info=limit_info,
+        volume_info=volume_info
     )
 
 

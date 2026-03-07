@@ -5,6 +5,9 @@
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 
+# Swagger UI本地化支持 (解决CDN访问问题)
+swagger-ui-bundle>=1.1.0
+
 # 数据库
 pymysql>=1.1.0
 sqlalchemy>=2.0.0
