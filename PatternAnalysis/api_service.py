@@ -234,6 +234,72 @@ async def startup_event():
     except Exception as e:
         print(f"警告: ATR稳定期缓存检查失败 (服务仍可启动): {e}")
 
+    # 启动时异步预热市值缓存（不阻塞启动）
+    try:
+        print("正在后台触发市值缓存预热...")
+        import threading
+
+        def preheat_market_cap():
+            try:
+                from PatternAnalysis.strategy.ATR.atr_stable_period_service import preheat_market_cap_cache
+                cached_count = preheat_market_cap_cache()
+                print(f"市值缓存预热完成，已缓存 {cached_count} 只股票的市值")
+            except Exception as e:
+                print(f"市值缓存预热失败: {e}")
+
+        # 在后台线程中运行，避免阻塞启动
+        market_cap_thread = threading.Thread(target=preheat_market_cap, daemon=True)
+        market_cap_thread.start()
+        print("市值缓存预热已在后台启动")
+    except Exception as e:
+        print(f"警告: 市值缓存预热触发失败 (服务仍可启动): {e}")
+
+    # 启动时异步触发limit和volume的recalculate（不阻塞启动）
+    try:
+        print("正在后台触发limit和volume缓存计算...")
+        import threading
+
+        def preheat_limit_cache():
+            try:
+                # 计算所有股票的涨停跌停信息并保存到Redis
+                results = calculate_limit_prices_for_all_stocks(num_threads=4)
+                saved_count = 0
+                for info in results:
+                    if save_limit_info_to_redis(info):
+                        saved_count += 1
+                print(f"limit缓存预热完成，已保存 {saved_count} 只股票到Redis")
+            except Exception as e:
+                print(f"limit缓存预热失败: {e}")
+
+        def preheat_volume_cache():
+            try:
+                # 计算历史最低价成交量并保存到Redis
+                results1 = calculate_lowest_price_volume_for_all_stocks(num_threads=4)
+                saved_lowest = 0
+                for info in results1:
+                    if save_lowest_price_volume_to_redis(info):
+                        saved_lowest += 1
+
+                # 计算涨停后成交量并保存到Redis
+                results2 = calculate_limit_up_volume_for_all_stocks(num_threads=4)
+                saved_limit_up = 0
+                for info in results2:
+                    if save_limit_up_volume_to_redis(info):
+                        saved_limit_up += 1
+
+                print(f"volume缓存预热完成，已保存 {saved_lowest} 只股票的历史最低价成交量和 {saved_limit_up} 只股票的涨停后成交量到Redis")
+            except Exception as e:
+                print(f"volume缓存预热失败: {e}")
+
+        # 在后台线程中运行，避免阻塞启动
+        limit_thread = threading.Thread(target=preheat_limit_cache, daemon=True)
+        volume_thread = threading.Thread(target=preheat_volume_cache, daemon=True)
+        limit_thread.start()
+        volume_thread.start()
+        print("limit和volume缓存计算已在后台启动")
+    except Exception as e:
+        print(f"警告: limit/volume缓存触发失败 (服务仍可启动): {e}")
+
 
 # ============== 数据模型 ==============
 
@@ -1087,58 +1153,36 @@ async def get_stable_periods_index(
     # 6.3 批量获取股票名称
     stock_names = get_stock_names_batch(page_stocks)
 
-    # 6.4 批量获取涨停跌停信息（使用Redis）
-    from .strategy.theme.limit_service import get_limit_info_from_redis, LIMIT_INFO_HASH_PREFIX
+    # 6.4 批量获取涨停跌停信息（优先从Redis缓存，缓存不存在则实时计算）
     limit_infos = {}
     try:
-        limit_redis_client = get_limit_info_from_redis.__self__()
-        if limit_redis_client:
-            import redis as redis_lib
-            limit_client = redis_lib.Redis(
-                host=REDIS_CONFIG["host"],
-                port=REDIS_CONFIG["port"],
-                db=REDIS_CONFIG.get("db", 0),
-                password=REDIS_CONFIG.get("password"),
-                decode_responses=True
-            )
-            if limit_client:
-                pipe = limit_client.pipeline()
-                for ts_code in page_stocks:
-                    hash_key = f"{LIMIT_INFO_HASH_PREFIX}{ts_code}"
-                    pipe.hgetall(hash_key)
-                limit_results = pipe.execute()
-                for i, ts_code in enumerate(page_stocks):
-                    data = limit_results[i]
-                    if data and data.get('ts_code'):
-                        limit_infos[ts_code] = {
-                            'limit_up_date': data.get('limit_up_date') or None,
-                            'limit_up_price': float(data['limit_up_price']) if data.get('limit_up_price') else None,
-                            'limit_down_date': data.get('limit_down_date') or None,
-                            'limit_down_price': float(data['limit_down_price']) if data.get('limit_down_price') else None,
-                            'sm_pre_up': float(data['sm_pre_up']) if data.get('sm_pre_up') else None,
-                            'sm_pre_down': float(data['sm_pre_down']) if data.get('sm_pre_down') else None
-                        }
+        for ts_code in page_stocks:
+            # 使用缓存优先的函数，如果Redis中没有数据会自动计算
+            limit_price_info = get_stock_limit_info(ts_code, use_cache=True)
+            if limit_price_info:
+                limit_infos[ts_code] = {
+                    'limit_up_date': limit_price_info.limit_up_date,
+                    'limit_up_price': limit_price_info.limit_up_price,
+                    'limit_down_date': limit_price_info.limit_down_date,
+                    'limit_down_price': limit_price_info.limit_down_price,
+                    'sm_pre_up': limit_price_info.sm_pre_up,
+                    'sm_pre_down': limit_price_info.sm_pre_down
+                }
     except Exception as e:
         logger.warning(f"批量获取涨停跌停信息失败: {e}")
 
-    # 6.5 批量获取涨停后成交量信息（使用Redis）
-    from .strategy.theme.volume_service import VOLUME_INFO_HASH_PREFIX
+    # 6.5 批量获取涨停后成交量信息（优先从Redis缓存，缓存不存在则实时计算）
     volume_infos = {}
     try:
-        if limit_client:
-            pipe = limit_client.pipeline()
-            for ts_code in page_stocks:
-                hash_key = f"{VOLUME_INFO_HASH_PREFIX}limit_up:{ts_code}"
-                pipe.hgetall(hash_key)
-            volume_results = pipe.execute()
-            for i, ts_code in enumerate(page_stocks):
-                data = volume_results[i]
-                if data and data.get('ts_code'):
-                    volume_infos[ts_code] = {
-                        'cumulative_volume': float(data['cumulative_volume']) if data.get('cumulative_volume') else None,
-                        'volume_ratio': float(data['volume_ratio']) if data.get('volume_ratio') else None,
-                        'days_since_limit_up': int(data['days_since_limit_up']) if data.get('days_since_limit_up') else None
-                    }
+        for ts_code in page_stocks:
+            # 使用缓存优先的函数，如果Redis中没有数据会自动计算
+            limit_up_volume_info = get_stock_limit_up_volume(ts_code, use_cache=True)
+            if limit_up_volume_info:
+                volume_infos[ts_code] = {
+                    'cumulative_volume': limit_up_volume_info.cumulative_volume,
+                    'volume_ratio': limit_up_volume_info.volume_ratio,
+                    'days_since_limit_up': limit_up_volume_info.days_since_limit_up
+                }
     except Exception as e:
         logger.warning(f"批量获取涨停后成交量信息失败: {e}")
 
@@ -1258,45 +1302,29 @@ async def get_stock_stable_periods(
     volume_info = None
 
     # 获取涨停跌停和成交量信息
+    # 优先从Redis缓存获取，如果缓存不存在则实时计算并缓存
     try:
-        from .strategy.theme.limit_service import get_limit_info_from_redis, LIMIT_INFO_HASH_PREFIX
-        from .strategy.theme.volume_service import VOLUME_INFO_HASH_PREFIX
-        import redis as redis_lib
-
-        # 确保REDIS_CONFIG已导入
-        from .config import REDIS_CONFIG
-
-        limit_client = redis_lib.Redis(
-            host=REDIS_CONFIG["host"],
-            port=REDIS_CONFIG["port"],
-            db=REDIS_CONFIG.get("db", 0),
-            password=REDIS_CONFIG.get("password"),
-            decode_responses=True
-        )
-
-        # 获取涨停跌停信息
-        limit_hash_key = f"{LIMIT_INFO_HASH_PREFIX}{ts_code}"
-        limit_data = limit_client.hgetall(limit_hash_key)
-        if limit_data and limit_data.get('ts_code'):
+        # 使用缓存优先的函数，如果Redis中没有数据会自动计算
+        limit_price_info = get_stock_limit_info(ts_code, use_cache=True)
+        if limit_price_info:
             limit_info = {
-                'limit_up_date': limit_data.get('limit_up_date') or None,
-                'limit_up_price': float(limit_data['limit_up_price']) if limit_data.get('limit_up_price') else None,
-                'limit_down_date': limit_data.get('limit_down_date') or None,
-                'limit_down_price': float(limit_data['limit_down_price']) if limit_data.get('limit_down_price') else None,
-                'latest_close': float(limit_data['latest_close']) if limit_data.get('latest_close') else None,
-                'sm_pre_up': float(limit_data['sm_pre_up']) if limit_data.get('sm_pre_up') else None,
-                'sm_pre_down': float(limit_data['sm_pre_down']) if limit_data.get('sm_pre_down') else None
+                'limit_up_date': limit_price_info.limit_up_date,
+                'limit_up_price': limit_price_info.limit_up_price,
+                'limit_down_date': limit_price_info.limit_down_date,
+                'limit_down_price': limit_price_info.limit_down_price,
+                'latest_close': limit_price_info.latest_close,
+                'sm_pre_up': limit_price_info.sm_pre_up,
+                'sm_pre_down': limit_price_info.sm_pre_down
             }
 
-        # 获取涨停后成交量信息
-        volume_hash_key = f"{VOLUME_INFO_HASH_PREFIX}limit_up:{ts_code}"
-        volume_data = limit_client.hgetall(volume_hash_key)
-        if volume_data and volume_data.get('ts_code'):
+        # 使用缓存优先的函数获取涨停后成交量信息
+        limit_up_volume_info = get_stock_limit_up_volume(ts_code, use_cache=True)
+        if limit_up_volume_info:
             volume_info = {
-                'cumulative_volume': float(volume_data['cumulative_volume']) if volume_data.get('cumulative_volume') else None,
-                'volume_ratio': float(volume_data['volume_ratio']) if volume_data.get('volume_ratio') else None,
-                'days_since_limit_up': int(volume_data['days_since_limit_up']) if volume_data.get('days_since_limit_up') else None,
-                'limit_up_date': volume_data.get('limit_up_date') or None
+                'cumulative_volume': limit_up_volume_info.cumulative_volume,
+                'volume_ratio': limit_up_volume_info.volume_ratio,
+                'days_since_limit_up': limit_up_volume_info.days_since_limit_up,
+                'limit_up_date': limit_up_volume_info.limit_up_date
             }
     except Exception as e:
         logger.warning(f"获取主题信息失败: {e}")
@@ -1574,6 +1602,14 @@ async def recalculate_all_stocks_limit(
     def run_calculation():
         results = calculate_limit_prices_for_all_stocks(num_threads=num_threads)
 
+        # 保存到Redis缓存
+        saved_count = 0
+        for info in results:
+            if save_limit_info_to_redis(info):
+                saved_count += 1
+
+        logger.info(f"limit recalculate: 已保存 {saved_count}/{len(results)} 只股票到Redis")
+
         # 统计有涨停/跌停的股票数量
         limit_up_count = sum(1 for r in results if r.limit_up_date)
         limit_down_count = sum(1 for r in results if r.limit_down_date)
@@ -1581,7 +1617,8 @@ async def recalculate_all_stocks_limit(
         return {
             "total_stocks": len(results),
             "limit_up_count": limit_up_count,
-            "limit_down_count": limit_down_count
+            "limit_down_count": limit_down_count,
+            "saved_count": saved_count
         }
 
     # 在线程池中运行（避免阻塞）
@@ -1593,7 +1630,8 @@ async def recalculate_all_stocks_limit(
         "total_stocks": result["total_stocks"],
         "limit_up_count": result["limit_up_count"],
         "limit_down_count": result["limit_down_count"],
-        "message": f"全量计算完成，共处理 {result['total_stocks']} 只股票"
+        "cached_count": result["saved_count"],
+        "message": f"全量计算完成，共处理 {result['total_stocks']} 只股票，已缓存 {result['saved_count']} 只"
     }
 
 
@@ -1811,9 +1849,24 @@ async def recalculate_all_stocks_volume(
         # 计算涨停后成交量
         results2 = calculate_limit_up_volume_for_all_stocks(num_threads=num_threads)
 
+        # 保存到Redis缓存
+        saved_lowest = 0
+        for info in results1:
+            if save_lowest_price_volume_to_redis(info):
+                saved_lowest += 1
+
+        saved_limit_up = 0
+        for info in results2:
+            if save_limit_up_volume_to_redis(info):
+                saved_limit_up += 1
+
+        logger.info(f"volume recalculate: 已保存 {saved_lowest} 只股票的历史最低价成交量和 {saved_limit_up} 只股票的涨停后成交量到Redis")
+
         return {
             "lowest_price_volume_count": len(results1),
-            "limit_up_volume_count": len(results2)
+            "limit_up_volume_count": len(results2),
+            "saved_lowest_count": saved_lowest,
+            "saved_limit_up_count": saved_limit_up
         }
 
     # 在线程池中运行（避免阻塞）
@@ -1823,7 +1876,9 @@ async def recalculate_all_stocks_volume(
     return {
         "status": "completed",
         "total_stocks": result["lowest_price_volume_count"],
-        "message": f"全量计算完成，共处理 {result['lowest_price_volume_count']} 只股票的历史最低价成交量和 {result['limit_up_volume_count']} 只股票的涨停后成交量"
+        "cached_lowest_price_volume": result["saved_lowest_count"],
+        "cached_limit_up_volume": result["saved_limit_up_count"],
+        "message": f"全量计算完成，共处理 {result['lowest_price_volume_count']} 只股票的历史最低价成交量和 {result['limit_up_volume_count']} 只股票的涨停后成交量，已缓存 {result['saved_lowest_count']} + {result['saved_limit_up_count']} 条数据"
     }
 
 
