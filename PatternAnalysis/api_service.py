@@ -94,6 +94,19 @@ from .strategy.theme.volume_service import (
 from orm.sw_query_service import SwIndustryQueryService, SwStockQueryService
 import math
 
+# Redis Stream 生产者相关导入
+try:
+    from PatternAnalysis.emlevel2 import (
+        start_scheduler,
+        stop_scheduler,
+        trigger_production,
+        is_enabled
+    )
+    EMLEVEL2_AVAILABLE = True
+except ImportError as e:
+    print(f"警告: emlevel2 模块导入失败: {e}")
+    EMLEVEL2_AVAILABLE = False
+
 
 def get_stock_names_batch(ts_codes: List[str]) -> Dict[str, str]:
     """
@@ -300,6 +313,19 @@ async def startup_event():
     except Exception as e:
         print(f"警告: limit/volume缓存触发失败 (服务仍可启动): {e}")
 
+    # 启动 Redis Stream 生产者调度器
+    if EMLEVEL2_AVAILABLE:
+        try:
+            from PatternAnalysis.emlevel2.config import is_enabled
+            if is_enabled():
+                print("正在启动 Redis Stream 生产者调度器...")
+                start_scheduler()
+                print("Redis Stream 生产者调度器已启动")
+            else:
+                print("Redis Stream 生产者未启用，跳过启动")
+        except Exception as e:
+            print(f"警告: Redis Stream 生产者调度器启动失败 (服务仍可启动): {e}")
+
 
 # ============== 数据模型 ==============
 
@@ -498,6 +524,15 @@ async def health_check():
         latest_trade_date=latest_dt.isoformat() if latest_dt else None,
         timestamp=datetime.now()
     )
+
+
+# 注册 Redis Stream 生产者 API 路由
+if EMLEVEL2_AVAILABLE:
+    try:
+        from PatternAnalysis.emlevel2.api_routes import register_routes
+        register_routes(app)
+    except Exception as e:
+        print(f"警告: Redis Stream 生产者 API 路由注册失败: {e}")
 
 
 @app.get("/api/patterns", response_model=PatternResponse)
@@ -2379,6 +2414,125 @@ async def get_industry_stocks(
     except Exception as e:
         logger.error(f"获取行业股票列表失败: {e}")
         raise HTTPException(status_code=500, detail=f"获取行业股票列表失败: {str(e)}")
+
+
+# ============== K线图相关API ==============
+
+@app.get("/api/chart/kline/{ts_code}")
+async def get_kline(
+    ts_code: str = Path(..., description="股票代码，如 '000001.SZ'"),
+    start_date: date = Query(..., description="开始日期，格式：YYYY-MM-DD"),
+    end_date: date = Query(..., description="结束日期，格式：YYYY-MM-DD"),
+    kline_type: str = Query("daily", description="K线类型：daily(日K)、weekly(周K)、monthly(月K)")
+):
+    """
+    获取K线数据
+
+    基于stocktradetodayinfo表提供日K、周K、月K线数据。
+
+    **参数说明：**
+    - ts_code: 股票代码
+    - start_date: 开始日期
+    - end_date: 结束日期
+    - kline_type: K线类型 (daily/weekly/monthly)
+
+    **返回示例：**
+    ```json
+    {
+        "ts_code": "000001.SZ",
+        "kline_type": "daily",
+        "start_date": "2024-01-01",
+        "end_date": "2024-01-31",
+        "total": 20,
+        "data": [
+            {
+                "trade_date": "2024-01-02",
+                "open": 10.50,
+                "high": 10.80,
+                "low": 10.40,
+                "close": 10.75,
+                "volume": 1250000,
+                "amount": 13250000.0,
+                "pct_chg": 2.38,
+                "pre_close": 10.50
+            }
+        ]
+    }
+    ```
+    """
+    from PatternAnalysis.chart.kline_service import get_kline as get_kline_data
+
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="start_date must be less than or equal to end_date")
+
+    # 限制日期范围，防止查询过多数据
+    date_diff = (end_date - start_date).days
+    if date_diff > 730:  # 最多查询2年数据
+        raise HTTPException(status_code=400, detail="日期范围不能超过2年")
+
+    try:
+        result = get_kline_data(
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            kline_type=kline_type
+        )
+
+        return {
+            "ts_code": result.ts_code,
+            "kline_type": result.kline_type,
+            "start_date": result.start_date,
+            "end_date": result.end_date,
+            "total": result.total,
+            "data": result.data
+        }
+    except Exception as e:
+        logger.error(f"获取K线数据失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取K线数据失败: {str(e)}")
+
+
+@app.get("/api/chart/kline/{ts_code}/chartjs")
+async def get_kline_chartjs(
+    ts_code: str = Path(..., description="股票代码，如 '000001.SZ'"),
+    days: int = Query(30, ge=1, le=365, description="获取最近多少天的数据")
+):
+    """
+    获取适合Chart.js渲染的K线数据
+
+    返回适合前端Chart.js使用的数据格式，包含OHLC数据和成交量。
+
+    **参数说明：**
+    - ts_code: 股票代码
+    - days: 获取最近多少天的数据（默认30天，最大365天）
+
+    **返回示例：**
+    ```json
+    {
+        "ts_code": "000001.SZ",
+        "count": 30,
+        "labels": ["2024-01-02", "2024-01-03"],
+        "ohlc": [
+            [10.50, 10.80, 10.40, 10.75],  // [开盘, 最高, 最低, 收盘]
+            [10.75, 11.00, 10.60, 10.90]
+        ],
+        "volume": [1250000, 1380000]
+    }
+    ```
+    """
+    from PatternAnalysis.chart.kline_service import get_kline_for_chartjs
+
+    try:
+        result = get_kline_for_chartjs(ts_code=ts_code, days=days)
+
+        if not result.get('labels'):
+            raise HTTPException(status_code=404, detail=f"未找到股票 {ts_code} 的K线数据")
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取Chart.js格式数据失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取Chart.js格式数据失败: {str(e)}")
 
 
 # ============== 启动服务 ==============
