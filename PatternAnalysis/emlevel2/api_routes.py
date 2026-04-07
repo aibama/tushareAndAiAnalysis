@@ -232,6 +232,88 @@ def get_stocks_from_db():
         }), 500
 
 
+# ============== Level2 价格区间统计 API ==============
+
+@producer_bp.route('/level2/price_band', methods=['GET'])
+def get_level2_price_band():
+    """
+    获取个股价格区间内的历史成交统计
+
+    查询参数:
+        - ts_code: 股票代码（必填），如 000001.SZ
+        - price_range_percent: 价格区间百分比（可选，默认 30）
+        - large_order_threshold: 大单阈值股数（可选，默认 10000）
+        - days_back: 回溯天数（可选，默认 30）
+
+    返回:
+        JSON 格式的统计数据
+    """
+    ts_code = request.args.get('ts_code')
+    if not ts_code:
+        return jsonify({
+            "success": False,
+            "message": "缺少必填参数: ts_code"
+        }), 400
+
+    # 可选参数
+    price_range_percent = request.args.get('price_range_percent', type=int)
+    large_order_threshold = request.args.get('large_order_threshold', type=int)
+    days_back = request.args.get('days_back', type=int, default=30)
+
+    try:
+        from .level2_price_band_service import get_price_band_statistics
+        result = get_price_band_statistics(
+            ts_code=ts_code,
+            price_range_percent=price_range_percent,
+            large_order_threshold=large_order_threshold,
+            days_back=days_back
+        )
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"获取价格区间统计失败: {e}")
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500
+
+
+@producer_bp.route('/level2/stock/search', methods=['GET'])
+def search_stock():
+    """
+    搜索股票（用于自动补全）
+
+    查询参数:
+        - keyword: 关键字（必填）
+        - limit: 返回数量（可选，默认 10）
+
+    返回:
+        JSON 格式的股票列表
+    """
+    keyword = request.args.get('keyword')
+    if not keyword:
+        return jsonify({
+            "success": False,
+            "message": "缺少必填参数: keyword"
+        }), 400
+
+    limit = request.args.get('limit', type=int, default=10)
+
+    try:
+        from .level2_price_band_service import get_stock_list_by_keyword
+        stocks = get_stock_list_by_keyword(keyword, limit)
+        return jsonify({
+            "success": True,
+            "count": len(stocks),
+            "data": stocks
+        })
+    except Exception as e:
+        logger.error(f"搜索股票失败: {e}")
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500
+
+
 def register_routes(app):
     """注册路由到 Flask 应用"""
     app.register_blueprint(producer_bp)

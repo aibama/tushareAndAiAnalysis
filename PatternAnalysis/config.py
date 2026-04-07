@@ -90,7 +90,14 @@ LOG_CONFIG = {
     "file": os.path.join(os.path.dirname(__file__), "logs", "pattern_analysis.log")
 }
 
-# 智途API配置
+# PostgreSQL 配置（stock_data 数据库）
+PG_CONFIG = {
+    "host": "localhost",
+    "port": 5432,
+    "user": "postgres",
+    "password": "940611",
+    "database": "stock_data"
+}
 ZHITU_API_CONFIG = {
     "token": "3738FCAC-163E-42A4-82CB-34423318394F",
     "base_url": "https://api.zhituapi.com",
@@ -99,8 +106,60 @@ ZHITU_API_CONFIG = {
     "data_source": "zhituapi"
 }
 
-# Tushare API配置
-TUSHARE_CONFIG = {
-    "token": "18bee8fb83e34ae5596920c58b6c799b30a99f1a0b3a2031168331f3f83d",
-    "http_url": "http://lianghua.nanyangqiankun.top"  # 自定义Tushare接口地址
+# Tsanghi API配置（股票日线数据）
+TSANGHI_API_CONFIG = {
+    "token": "ab0e7c09434f4277bb65a016403db823",  # TODO: 替换为实际token
+    "base_url": "https://www.tsanghi.com/api/fin/stock",
+    "request_timeout": 30,  # 请求超时时间（秒）
+    "retry_times": 3,  # 重试次数
+    "retry_interval": 5,  # 重试间隔（秒）
+
+    # 并发配置
+    "max_workers": 3,  # 最大并发线程数
+
+    # 限流配置（每分钟请求上限）
+    "rate_limit_per_minute": 60,  # 每分钟请求上限
+
+    # 分布式锁配置
+    "lock_key_prefix": "tsanghi:sync:lock:",  # 分布式锁key前缀
+    "lock_timeout": 3600,  # 锁超时时间（秒），默认1小时
+}
+
+# 日志表配置（用于记录数据同步状态）
+LOG_TABLE_CONFIG = {
+    "log_code_stock_daily": "000003",  # stock_daily_data_fill_tsanghiapi
+}
+
+# 交易所代码映射
+EXCHANGE_CODE_MAPPING = {
+    "SZ": "XSHE",  # 深圳交易所
+    "SH": "XSHG",  # 上海交易所
+}
+
+# AkShare 批量写入 stocktradetodayinfo 时的并发数（避免过快请求东方财富接口）
+AKSHARE_SYNC_CONFIG = {
+    "max_workers": 3,  # 保守并发，降低被上游拒绝连接概率
+    "window_seconds": 600,  # 10分钟时间窗
+    "request_limit_per_window": 200,  # 时间窗内最大请求数
+    "request_min_interval_seconds": 1.4,  # 相邻请求最小随机间隔
+    "request_max_interval_seconds": 3.6,  # 相邻请求最大随机间隔
+}
+
+# Baostock 批量写入 stocktradetodayinfo（与 AKSHARE_SYNC_CONFIG 语义对齐；默认单线程 + 串行 query 锁）
+BAOSTOCK_SYNC_CONFIG = {
+    "max_workers": 1,
+    "window_seconds": 600,
+    "request_limit_per_window": 60,
+    "request_min_interval_seconds": 1.4,
+    "request_max_interval_seconds": 10.0,
+    # run_server 启动分布式同步时：全量/补数下界（与库内最早业务约定一致，如当前库最小为 2023-01-03）
+    "sync_min_start_date": "2023-01-03",
+}
+
+# AkShare 代理配置
+AKSHARE_PROXY_CONFIG = {
+    "enabled": True,  # 是否启用代理
+    "host": "101.201.173.125",  # 代理主机
+    "port": 50,  # 代理端口
+    "user": "",  # 代理用户名（可选）
 }

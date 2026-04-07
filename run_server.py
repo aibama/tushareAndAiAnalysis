@@ -4,6 +4,8 @@
 """
 import sys
 import os
+import threading
+import logging
 
 # 确保当前目录在Python路径中
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -16,16 +18,30 @@ except ImportError as e:
     print("请确保已安装所有依赖")
     sys.exit(1)
 
+logger = logging.getLogger(__name__)
+
 if __name__ == "__main__":
     print("=" * 60)
-    print("  股票形态分析系统")
+    print("股票形态分析系统启动中...")
     print("=" * 60)
-    print(f"启动服务: http://{API_CONFIG['host']}:{API_CONFIG['port']}")
-    print()
-    
+
+    # 启动时后台自动执行 Baostock 同步（分布式多节点支持）
+    def _auto_baostock_sync():
+        try:
+            from PatternAnalysis.baostock_api.distributed_startup_runner import (
+                run_baostock_tradetoday_distributed_on_startup,
+            )
+
+            run_baostock_tradetoday_distributed_on_startup()
+        except Exception as e:
+            logger.exception("启动 Baostock 自动同步失败: %s", e)
+
+    t = threading.Thread(target=_auto_baostock_sync, daemon=True)
+    t.start()
+
     uvicorn.run(
         "PatternAnalysis.api_service:app",
-        host=API_CONFIG["host"],
-        port=API_CONFIG["port"],
+        host=API_CONFIG.get("host", "0.0.0.0"),
+        port=API_CONFIG.get("port", 8081),
         reload=API_CONFIG.get("debug", False)
     )

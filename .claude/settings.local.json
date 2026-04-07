@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show:*)",
+      "Bash(python -c \"import akshare as ak; print\\(hasattr\\(ak, ''get_stock_zh_a_hist''\\)\\); print\\(hasattr\\(ak, ''stock_zh_a_hist''\\)\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(python -c \"import akshare; print\\(akshare.__file__\\)\")",
+      "Bash(python -c \"import akshare as ak; print\\(ak.__file__\\)\")",
+      "Bash(where python:*)",
+      "Bash(python -c \"import site; print\\(site.getsitepackages\\(\\)\\)\")",
+      "Read(//c/Python314/Lib/site-packages/**)",
+      "Bash(C:/Users/dzs52/miniconda3/envs/py_newest_stock/python.exe -c \"import akshare as ak; print\\(ak.__file__\\); print\\(hasattr\\(ak, ''get_stock_zh_a_hist''\\)\\)\")",
+      "Read(//c/Users/dzs52/miniconda3/envs/py_newest_stock/**)",
+      "Bash(C:/Users/dzs52/miniconda3/envs/py_newest_stock/python.exe -c \"from PatternAnalysis.akshare_api.hist_service import StockZhAHistService; print\\(''OK''\\)\")",
+      "Bash(C:/Users/dzs52/miniconda3/envs/py_newest_stock/python.exe -c \":*)",
+      "Bash(C:/Users/dzs52/miniconda3/envs/py_newest_stock/python.exe run_server.py)",
+      "Bash(C:/Users/dzs52/miniconda3/envs/py_newest_stock/python.exe -c ':*)",
+      "Bash(C:/Users/dzs52/miniconda3/envs/py_newest_stock/python.exe -c \"print\\('hello'\\)\")",
+      "Bash(C:/Users/dzs52/miniconda3/envs/py_newest_stock/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); print\\('path set'\\); from PatternAnalysis.config import API_CONFIG; print\\('done'\\)\")",
+      "Bash(timeout 5 C:/Users/dzs52/miniconda3/envs/py_newest_stock/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); import os; print\\('os imported'\\)\")",
+      "Bash(timeout 10 C:/Users/dzs52/miniconda3/envs/py_newest_stock/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); exec\\('import PatternAnalysis'\\)\")"
+    ]
+  }
+}

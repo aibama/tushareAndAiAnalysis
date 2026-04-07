@@ -1,4 +1,4 @@
-# 智途API股票数据爬虫
+# (deprecated)智途API股票数据爬虫
 
 使用 `requests` 库调用智途API，获取股票数据并存入MySQL数据库。
 

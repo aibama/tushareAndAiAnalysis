@@ -10,5 +10,8 @@
     ],
     "terminal.integrated.env.windows": {
         "PYTHONPATH": "${workspaceFolder};${workspaceFolder}/venv/src"
-    }
+    },
+     // 临时注释掉这两行
+    //"python-envs.defaultEnvManager": "ms-python.python:conda",
+    //"python-envs.defaultPackageManager": "ms-python.python:conda"
 }

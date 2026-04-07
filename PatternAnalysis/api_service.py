@@ -94,6 +94,30 @@ from .strategy.theme.volume_service import (
 from orm.sw_query_service import SwIndustryQueryService, SwStockQueryService
 import math
 
+# Tsanghi 股票日线数据 API 相关导入
+try:
+    from PatternAnalysis.tsanghiapi.api_routes import router as tsanghi_router
+    TSANGHI_AVAILABLE = True
+except ImportError as e:
+    print(f"警告: tsanghiapi 模块导入失败: {e}")
+    TSANGHI_AVAILABLE = False
+
+# AkShare 应用层 API 路由
+try:
+    from PatternAnalysis.akshare_api.api_routes import router as akshare_router
+    AKSHARE_API_AVAILABLE = True
+except ImportError as e:
+    print(f"警告: akshare API 路由导入失败: {e}")
+    AKSHARE_API_AVAILABLE = False
+
+# Baostock 应用层 API 路由
+try:
+    from PatternAnalysis.baostock_api.api_routes import router as baostock_router
+    BAOSTOCK_API_AVAILABLE = True
+except ImportError as e:
+    print(f"警告: baostock API 路由导入失败: {e}")
+    BAOSTOCK_API_AVAILABLE = False
+
 # Redis Stream 生产者相关导入
 try:
     from PatternAnalysis.emlevel2 import (
@@ -208,6 +232,45 @@ swagger_ui_path = os.path.join(os.path.dirname(swagger_ui_bundle.__file__), "ven
 
 # 挂载静态文件目录
 app.mount("/static/swagger-ui", StaticFiles(directory=swagger_ui_path), name="swagger-ui")
+
+
+# 注册 Tsanghi 股票日线数据 API 路由
+if TSANGHI_AVAILABLE:
+    try:
+        app.include_router(tsanghi_router)
+        print("Tsanghi 股票日线数据 API 路由已注册")
+    except Exception as e:
+        print(f"警告: Tsanghi API 路由注册失败: {e}")
+
+# 注册 AkShare 相关 API 路由
+if AKSHARE_API_AVAILABLE:
+    try:
+        app.include_router(akshare_router)
+        print("AkShare API 路由已注册")
+    except Exception as e:
+        print(f"警告: AkShare API 路由注册失败: {e}")
+
+if BAOSTOCK_API_AVAILABLE:
+    try:
+        app.include_router(baostock_router)
+        print("Baostock API 路由已注册")
+    except Exception as e:
+        print(f"警告: Baostock API 路由注册失败: {e}")
+
+# Ollama 相关 API（stocktradetodayinfo K 线导出等）
+try:
+    from PatternAnalysis.ollama.api_routes import router as ollama_router
+    OLLAMA_AVAILABLE = True
+except ImportError as e:
+    print(f"警告: ollama API 路由导入失败: {e}")
+    OLLAMA_AVAILABLE = False
+
+if OLLAMA_AVAILABLE:
+    try:
+        app.include_router(ollama_router)
+        print("Ollama API 路由已注册")
+    except Exception as e:
+        print(f"警告: Ollama API 路由注册失败: {e}")
 
 
 # 初始化增量表
