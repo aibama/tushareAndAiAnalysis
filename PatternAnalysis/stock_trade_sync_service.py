@@ -217,6 +217,7 @@ def insert_or_update_trade_info(trade_data: Dict[str, Any]) -> bool:
 def sync_daily_trade_data(target_date: date = None) -> Dict[str, Any]:
     """
     同步指定日期的交易数据
+    deprecated: 该服务从pgsql同步日数据到mysql服务取消，请使用 Baostock/AkShare 服务
 
     Args:
         target_date: 目标日期，默认今天
@@ -265,6 +266,7 @@ if __name__ == "__main__":
     import logging
     logging.basicConfig(level=logging.INFO)
 
+    # deprecated: 该服务从pgsql同步日数据到mysql服务取消，请使用 Baostock/AkShare 服务
     # 测试同步今天的数据
     result = sync_daily_trade_data()
     print(f"同步结果: {result}")

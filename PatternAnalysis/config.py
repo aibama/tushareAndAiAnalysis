@@ -147,6 +147,7 @@ AKSHARE_SYNC_CONFIG = {
 
 # Baostock 批量写入 stocktradetodayinfo（与 AKSHARE_SYNC_CONFIG 语义对齐；默认单线程 + 串行 query 锁）
 BAOSTOCK_SYNC_CONFIG = {
+    "enabled": False,  # 是否启用启动同步（默认 True）
     "max_workers": 1,
     "window_seconds": 600,
     "request_limit_per_window": 60,

@@ -25,15 +25,18 @@ SYNC_LOCK_KEY = "batch_sync_all"
 class RedisLock:
     """基于 Redis 的分布式锁"""
 
-    def __init__(self, lock_key: str, timeout: int = None):
+    def __init__(self, lock_key: str, timeout: int = None, prefix: str = None):
         """
         初始化分布式锁
 
         Args:
             lock_key: 锁的 key
             timeout: 锁超时时间（秒），默认使用配置
+            prefix: 锁 key 前缀，默认使用 Tsanghi 配置
         """
-        self.lock_key = f"{TSANGHI_API_CONFIG.get('lock_key_prefix', 'tsanghi:sync:lock:')}{lock_key}"
+        # 默认使用 Tsanghi 的前缀，保持向后兼容
+        default_prefix = TSANGHI_API_CONFIG.get('lock_key_prefix', 'tsanghi:sync:lock:')
+        self.lock_key = f"{prefix or default_prefix}{lock_key}"
         self.timeout = timeout or TSANGHI_API_CONFIG.get("lock_timeout", 3600)
         self.lock_value = str(uuid.uuid4())  # 锁的值，用于区分不同客户端
         self.redis_client = None

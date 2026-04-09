@@ -39,6 +39,20 @@ if __name__ == "__main__":
     t = threading.Thread(target=_auto_baostock_sync, daemon=True)
     t.start()
 
+    # 启动时后台自动执行涨跌停状态同步（分布式多节点支持）
+    def _auto_limit_status_sync():
+        try:
+            from orm.etf.stock_daily.distributed_startup_runner import (
+                run_limit_status_sync_on_startup,
+            )
+
+            run_limit_status_sync_on_startup()
+        except Exception as e:
+            logger.exception("启动涨跌停状态自动同步失败: %s", e)
+
+    t2 = threading.Thread(target=_auto_limit_status_sync, daemon=True)
+    t2.start()
+
     uvicorn.run(
         "PatternAnalysis.api_service:app",
         host=API_CONFIG.get("host", "0.0.0.0"),

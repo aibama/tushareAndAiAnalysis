@@ -1,5 +1,5 @@
 """
-Baostock /api/baostock/sync/tradetoday/all 的逻辑抽离后的“启动分布式执行器”。
+Baostock /api/baostock/sync/tradetoday/all 的逻辑抽离后的"启动分布式执行器"。
 
 目标：
 1) 多节点（多个进程/机器）同时启动时，按 node_id/node_count 分片执行；
@@ -21,6 +21,7 @@ from PatternAnalysis.baostock_api.sync_tradetoday_service import (
 )
 from PatternAnalysis.tsanghiapi.distributed_lock import RedisLock
 from PatternAnalysis.baostock_api.startup_sync_dates import resolve_startup_sync_date_range
+from PatternAnalysis.config import BAOSTOCK_SYNC_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +56,21 @@ def run_baostock_tradetoday_distributed_on_startup() -> None:
             return
         _started_once = True
 
-    enabled = _env_str("BAOSTOCK_SYNC_ON_STARTUP_ENABLED", "true").lower() in (
-        "1",
-        "true",
-        "yes",
-        "y",
-        "t",
-    )
+    # 读取配置中的 enabled，fallback 到环境变量
+    config_enabled = BAOSTOCK_SYNC_CONFIG.get("enabled")
+    if config_enabled is not None:
+        enabled = config_enabled
+    else:
+        # 兼容旧环境变量逻辑
+        enabled = _env_str("BAOSTOCK_SYNC_ON_STARTUP_ENABLED", "true").lower() in (
+            "1",
+            "true",
+            "yes",
+            "y",
+            "t",
+        )
     if not enabled:
-        logger.info("BAOSTOCK_SYNC_ON_STARTUP_ENABLED=false，跳过启动自动同步")
+        logger.info("BAOSTOCK_SYNC_CONFIG.enabled=false，跳过启动自动同步")
         return
 
     adjust = _env_str("BAOSTOCK_SYNC_ADJUST", "")
@@ -98,12 +105,18 @@ def run_baostock_tradetoday_distributed_on_startup() -> None:
         "t",
     )
 
+    logger.debug("开始获取 stockinfobase 列表...")
+
     # 取 stockinfobase 全量 ts_code，并按 node_id/node_count 切分
     stocks = list_stockinfobase_with_stock_code()
+    logger.debug(f"获取到 {len(stocks)} 只股票")
+
     # 注意：stockinfobase 查询未必有 ORDER BY，不同节点/不同启动时间可能返回顺序不同。
-    # 为保证“跨节点不重叠”，这里对 ts_code 做确定性排序后再按 i%node_count 分片。
+    # 为保证"跨节点不重叠"，这里对 ts_code 做确定性排序后再按 i%node_count 分片。
     all_ts_codes: List[str] = [str(s.get("ts_code") or "").strip() for s in stocks if s.get("ts_code")]
     all_ts_codes = sorted({c for c in all_ts_codes if c})
+    logger.debug(f"去重后 {len(all_ts_codes)} 只股票")
+
     if not all_ts_codes:
         logger.warning("stockinfobase 为空，跳过 baostock 同步")
         return
@@ -112,6 +125,8 @@ def run_baostock_tradetoday_distributed_on_startup() -> None:
     partitioned_ts_codes = [
         c for i, c in enumerate(all_ts_codes) if (i % node_count) == node_id
     ]
+    logger.debug(f"本节点分片 {len(partitioned_ts_codes)} 只股票 (node_id={node_id})")
+
     if limit_per_node and limit_per_node > 0:
         partitioned_ts_codes = partitioned_ts_codes[:limit_per_node]
 
@@ -119,17 +134,26 @@ def run_baostock_tradetoday_distributed_on_startup() -> None:
         logger.info("本节点分片为空（node_id=%s），跳过", node_id)
         return
 
+    logger.debug("开始获取分布式锁...")
+
     lock_timeout_sec = _env_int("BAOSTOCK_SYNC_LOCK_TIMEOUT_SECONDS", 21600)  # 默认 6 小时
-    # 锁 key：默认“每节点一把锁”，允许不同 node_id 并行；若用 global lock 则所有节点互斥
+    # 锁 key：默认"每节点一把锁"，允许不同 node_id 并行；若用 global lock 则所有节点互斥
     if use_global_lock:
         lock_key = f"baostock:sync:tradetoday:{start_date}:{end_date}:{adjust}"
     else:
         lock_key = f"baostock:sync:tradetoday:{start_date}:{end_date}:{adjust}:node{node_id}"
 
-    lock = RedisLock(lock_key, timeout=lock_timeout_sec)
-    acquired = lock.acquire(blocking=False)
-    if not acquired:
-        logger.info("未获取分布式锁 %s（说明该节点/任务已在运行），跳过", lock.lock_key)
+    lock = None
+    try:
+        # 使用独立的 Baostock 锁前缀，避免与 Tsanghi 冲突
+        lock = RedisLock(lock_key, timeout=lock_timeout_sec, prefix="baostock:sync:lock:")
+        acquired = lock.acquire(blocking=False)
+        if not acquired:
+            logger.info("未获取分布式锁 %s（说明该节点/任务已在运行），跳过", lock.lock_key)
+            return
+        logger.debug("分布式锁获取成功: %s", lock.lock_key)
+    except Exception as e:
+        logger.warning(f"获取分布式锁失败（可能是 Redis 未启动）: {e}，跳过启动同步")
         return
 
     try:

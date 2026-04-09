@@ -118,6 +118,14 @@ except ImportError as e:
     print(f"警告: baostock API 路由导入失败: {e}")
     BAOSTOCK_API_AVAILABLE = False
 
+# 涨跌停状态 API 路由
+try:
+    from orm.etf.stock_daily.api_routes import router as limit_status_router
+    LIMIT_STATUS_AVAILABLE = True
+except ImportError as e:
+    print(f"警告: limit_status API 路由导入失败: {e}")
+    LIMIT_STATUS_AVAILABLE = False
+
 # Redis Stream 生产者相关导入
 try:
     from PatternAnalysis.emlevel2 import (
@@ -256,6 +264,13 @@ if BAOSTOCK_API_AVAILABLE:
         print("Baostock API 路由已注册")
     except Exception as e:
         print(f"警告: Baostock API 路由注册失败: {e}")
+
+if LIMIT_STATUS_AVAILABLE:
+    try:
+        app.include_router(limit_status_router)
+        print("涨跌停状态 API 路由已注册")
+    except Exception as e:
+        print(f"警告: 涨跌停状态 API 路由注册失败: {e}")
 
 # Ollama 相关 API（stocktradetodayinfo K 线导出等）
 try:

@@ -72,14 +72,16 @@ def has_tradetoday_data_in_range(ts_code: str, start_date: str, end_date: str) -
     判断指定股票在日期区间是否已落表。
 
     说明：
-    - 只要该区间内已有任意记录，即判定为“已同步过”，用于避免同参数重复执行。
+    - 只要该区间内已有任意记录，即判定为"已同步过"，用于避免同参数重复执行。
     """
     sd = to_yyyymmdd(start_date)
     ed = to_yyyymmdd(end_date)
     if not ts_code or not sd or not ed:
+        logger.warning(f"幂等检查参数无效: ts_code={ts_code}, start_date={start_date}, end_date={end_date}")
         return False
     if sd > ed:
         sd, ed = ed, sd
+        logger.debug(f"日期范围颠倒，已自动调整: start={sd}, end={ed}")
 
     sql = """
     SELECT 1
@@ -91,9 +93,30 @@ def has_tradetoday_data_in_range(ts_code: str, start_date: str, end_date: str) -
     """
     sd_dt = datetime.strptime(sd, "%Y%m%d")
     ed_dt_next = datetime.strptime(ed, "%Y%m%d") + timedelta(days=1)
+    logger.debug(f"幂等检查: ts_code={ts_code}, trade_date >= {sd_dt}, trade_date < {ed_dt_next}")
     with get_connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute(sql, (ts_code, sd_dt, ed_dt_next))
+            result = cursor.fetchone() is not None
+            if result:
+                logger.info(f"幂等检查命中: ts_code={ts_code} 在 {sd}~{ed} 区间已有数据，跳过 API 调用")
+            return result
+
+
+def has_tradetoday_data_any(ts_code: str) -> bool:
+    """
+    判断指定股票是否有任何历史数据（任意日期）。
+
+    用于：当 API 返回空数据时，判断该股票是否曾经有数据。
+    - 如果有数据，说明是停牌等正常情况，返回 "skipped"
+    - 如果无数据，说明是真正的异常，返回 "error"
+    """
+    if not ts_code:
+        return False
+    sql = "SELECT 1 FROM stocktradetodayinfo WHERE ts_code = %s LIMIT 1"
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(sql, (ts_code,))
             return cursor.fetchone() is not None
 
 

@@ -19,6 +19,7 @@ if _project_root not in sys.path:
 
 from PatternAnalysis.akshare_api.stock_list_service import list_stockinfobase_with_stock_code
 from PatternAnalysis.akshare_api.tradetoday_upsert import (
+    has_tradetoday_data_any,
     has_tradetoday_data_in_range,
     upsert_tradetoday_rows,
 )
@@ -134,14 +135,28 @@ def _sync_one_stock(
         records = hist.query_daily_records(ts_code, start_date, end_date, adjust)
 
         if not records:
-            logger.warning(f"{ts_code}: Baostock 返回空数据 (start={start_date}, end={end_date})")
-            return {
-                "ts_code": ts_code,
-                "status": "error",
-                "message": f"Baostock 返回空数据 (start={start_date}, end={end_date})",
-                "rows_saved": 0,
-                "rows_fetched": 0,
-            }
+            # API 返回空数据时，判断该股票是否有任何历史数据
+            # - 如果有数据：可能是停牌/无交易，视为 "skipped"（已同步过）
+            # - 如果无数据：可能是股票代码错误等异常，视为 "error"
+            has_any = has_tradetoday_data_any(ts_code)
+            if has_any:
+                logger.info(f"{ts_code}: Baostock 返回空数据 (start={start_date}, end={end_date})，但该股票已有历史数据，视为停牌/无交易，跳过")
+                return {
+                    "ts_code": ts_code,
+                    "status": "skipped",
+                    "message": f"Baostock 返回空数据 (start={start_date}, end={end_date})，该股票已有历史数据，视为停牌",
+                    "rows_saved": 0,
+                    "rows_fetched": 0,
+                }
+            else:
+                logger.warning(f"{ts_code}: Baostock 返回空数据 (start={start_date}, end={end_date})，该股票无任何历史数据")
+                return {
+                    "ts_code": ts_code,
+                    "status": "error",
+                    "message": f"Baostock 返回空数据 (start={start_date}, end={end_date})，该股票无任何历史数据",
+                    "rows_saved": 0,
+                    "rows_fetched": 0,
+                }
         rows_fetched = len(records)
         logger.debug(f"{ts_code}: 获取到 {rows_fetched} 条数据")
 
