@@ -2,14 +2,15 @@
 股票形态分析系统 - 配置文件
 """
 import os
+from .config_stash import get_config, get_config_int
 
-# 数据库配置
+# 数据库配置（从 stash 获取）
 DB_CONFIG = {
-    "host": "localhost",
-    "port": 3306,
-    "user": "root",
-    "password": "123456",
-    "database": "stockdata",
+    "host": get_config("app/config/db/host", "localhost"),
+    "port": get_config_int("app/config/db/port", 3306),
+    "user": get_config("app/config/db/user", "root"),
+    "password": get_config("app/config/db/password", "123456"),
+    "database": get_config("app/config/db/database", "stockdata"),
     "charset": "utf8",
     # MySQL连接池配置
     "pool_size": 5,
@@ -23,12 +24,12 @@ MODEL_CONFIG = {
     # 序列长度配置
     "sequence_length": 120,
     "feature_length": 100,
-    
+
     # 训练配置（针对6GB显卡优化）
     "batch_size": 32,
     "learning_rate": 0.001,
     "epochs": 100,
-    
+
     # 模型路径
     "model_path": os.path.join(os.path.dirname(__file__), "models"),
     "model_file": "pattern_classifier.pth"
@@ -73,12 +74,12 @@ API_CONFIG = {
     "version": "1.0.0"
 }
 
-# Redis配置
+# Redis配置（从 stash 获取）
 REDIS_CONFIG = {
-    "host": "localhost",
-    "port": 6379,
-    "db": 0,
-    "password": "dzs940611",
+    "host": get_config("app/config/redis/host", "localhost"),
+    "port": get_config_int("app/config/redis/port", 6379),
+    "db": get_config_int("app/config/redis/db", 0),
+    "password": get_config("app/config/redis/password", "dzs940611"),
     "key_prefix": "stock_rank:",
     "cache_ttl": 3600  # 缓存1小时
 }
@@ -90,16 +91,16 @@ LOG_CONFIG = {
     "file": os.path.join(os.path.dirname(__file__), "logs", "pattern_analysis.log")
 }
 
-# PostgreSQL 配置（stock_data 数据库）
+# PostgreSQL 配置（从 stash 获取）
 PG_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "user": "postgres",
-    "password": "940611",
-    "database": "stock_data"
+    "host": get_config("app/config/pg/host", "localhost"),
+    "port": get_config_int("app/config/pg/port", 5432),
+    "user": get_config("app/config/pg/user", "postgres"),
+    "password": get_config("app/config/pg/password", "940611"),
+    "database": get_config("app/config/pg/database", "stock_data")
 }
 ZHITU_API_CONFIG = {
-    "token": "3738FCAC-163E-42A4-82CB-34423318394F",
+    "token": get_config("app/config/zhitu/token", "3738FCAC-163E-42A4-82CB-34423318394F"),
     "base_url": "https://api.zhituapi.com",
     "request_interval_min": 5000,  # 最小间隔5秒
     "request_interval_max": 10000,  # 最大间隔10秒
@@ -108,7 +109,7 @@ ZHITU_API_CONFIG = {
 
 # Tsanghi API配置（股票日线数据）
 TSANGHI_API_CONFIG = {
-    "token": "ab0e7c09434f4277bb65a016403db823",  # TODO: 替换为实际token
+    "token": get_config("app/config/tsanghi/token", "ab0e7c09434f4277bb65a016403db823"),  # TODO: 替换为实际token
     "base_url": "https://www.tsanghi.com/api/fin/stock",
     "request_timeout": 30,  # 请求超时时间（秒）
     "retry_times": 3,  # 重试次数
@@ -147,7 +148,7 @@ AKSHARE_SYNC_CONFIG = {
 
 # Baostock 批量写入 stocktradetodayinfo（与 AKSHARE_SYNC_CONFIG 语义对齐；默认单线程 + 串行 query 锁）
 BAOSTOCK_SYNC_CONFIG = {
-    "enabled": False,  # 是否启用启动同步（默认 True）
+    "enabled": True,  # 是否启用启动同步（默认 True）
     "max_workers": 1,
     "window_seconds": 600,
     "request_limit_per_window": 60,
